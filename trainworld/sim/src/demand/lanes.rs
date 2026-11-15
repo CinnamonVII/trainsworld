@@ -44,6 +44,12 @@ impl F4 {
     pub fn gather(row: &[f32], ix: &[u32; 4]) -> F4 {
         F4::of4(row[ix[0] as usize], row[ix[1] as usize], row[ix[2] as usize], row[ix[3] as usize])
     }
+    /// Fixed-order sum `(l0 + l1) + (l2 + l3)`, deterministic across native and wasm.
+    #[inline(always)]
+    pub fn sum_fixed(self) -> f32 {
+        let a = self.to_array();
+        (a[0] + a[1]) + (a[2] + a[3])
+    }
     /// Four rows of four lanes as four columns.
     #[inline(always)]
     pub fn transpose(r: [F4; 4]) -> [F4; 4] {
@@ -213,6 +219,12 @@ mod imp {
             debug_assert!(a.len() >= 4);
             unsafe { F4(v128_load(a.as_ptr() as *const v128)) }
         }
+        /// Store four consecutive floats.
+        #[inline(always)]
+        pub fn store(self, a: &mut [f32]) {
+            debug_assert!(a.len() >= 4);
+            unsafe { v128_store(a.as_mut_ptr() as *mut v128, self.0) }
+        }
         /// Four lane values, built without a temporary array.
         #[inline(always)]
         pub fn of4(a: f32, b: f32, c: f32, d: f32) -> F4 {
@@ -310,6 +322,12 @@ mod imp {
         pub fn load(a: &[f32]) -> F4 {
             debug_assert!(a.len() >= 4);
             unsafe { F4(_mm_loadu_ps(a.as_ptr())) }
+        }
+        /// Store four consecutive floats.
+        #[inline(always)]
+        pub fn store(self, a: &mut [f32]) {
+            debug_assert!(a.len() >= 4);
+            unsafe { _mm_storeu_ps(a.as_mut_ptr(), self.0) }
         }
         /// Four lane values, built without a temporary array (`_mm_set_ps` takes them in
         /// reverse).
@@ -410,6 +428,12 @@ mod imp {
         pub fn load(a: &[f32]) -> F4 {
             debug_assert!(a.len() >= 4);
             F4([a[0], a[1], a[2], a[3]])
+        }
+        /// Store four consecutive floats.
+        #[inline(always)]
+        pub fn store(self, a: &mut [f32]) {
+            debug_assert!(a.len() >= 4);
+            a[..4].copy_from_slice(&self.0);
         }
         /// Four lane values, built without a temporary array.
         #[inline(always)]
