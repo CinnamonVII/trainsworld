@@ -2912,13 +2912,25 @@ impl Network {
             return None;
         }
         let built_stop = |s: u32| self.node_ok(s) && self.node_built[s as usize] && self.node_platform[s as usize] > 0;
+        let back_built = |span_stops: &[u32], span_path: &[u32]| {
+            let once = self.line_one_way.get(l as usize).copied().unwrap_or(false) && self.loop_kind(span_stops, span_path) != LoopKind::None;
+            if once || span_path.iter().all(|&p| self.dir_ok(p ^ 1)) {
+                return true;
+            }
+            self.back_path_of(span_stops, span_path).is_some_and(|back| {
+                back.iter().all(|&p| {
+                    let e = path_edge(p);
+                    self.edge_ok(e) && self.edge_built[e as usize]
+                })
+            })
+        };
         // a fully built line serves its whole plan, as before: its path may pass a stop twice (a
         // balloon, or a loop back past the first stop), which the span search below would cut short
         let built_path = path.iter().all(|&p| {
             let e = path_edge(p);
             self.edge_ok(e) && self.edge_built[e as usize] && self.dir_ok(p)
         });
-        if built_path && stops.iter().all(|&s| built_stop(s)) {
+        if built_path && stops.iter().all(|&s| built_stop(s)) && back_built(stops, path) {
             return Some(LineSpan { stop0: 0, stop1: stops.len() as u32, path0: 0, path1: path.len() as u32 });
         }
         let mut nodes = Vec::with_capacity(path.len() + 1);
@@ -2948,6 +2960,9 @@ impl Network {
                 }
                 len += path[end..next].iter().map(|&p| self.edge_len[path_edge(p) as usize]).sum::<f64>();
                 end = next;
+                if !back_built(&stops[i..=j], &path[pos[i]..end]) {
+                    continue;
+                }
                 let span = LineSpan { stop0: i as u32, stop1: j as u32 + 1, path0: pos[i] as u32, path1: end as u32 };
                 let more = best.map_or(true, |(_, been, n)| len > been + 1e-9 || ((len - been).abs() <= 1e-9 && j - i + 1 > n));
                 if more {
@@ -3036,8 +3051,8 @@ impl Network {
                 self.line_ok(l)
                     && self.line_bus.get(l as usize).map_or(true, |b| b.is_none())
                     && self.line_ferry.get(l as usize).map_or(true, |f| f.is_none())
-                    && self.line_path(l).iter().any(|&p| !self.dir_ok(p ^ 1))
-                    && !self.line_runs_once(l)
+                    && self.line_run_path(l).iter().any(|&p| !self.dir_ok(p ^ 1))
+                    && !self.line_run_runs_once(l)
             })
             .collect()
     }

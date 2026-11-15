@@ -168,7 +168,14 @@ impl Capacity {
 
     /// The merge at `node`, if a running line joins the shared track there (T-2185, wire kind 12).
     pub fn merge_at(&self, node: u32) -> Option<usize> {
-        (0..self.res.len()).find(|&r| self.res[r].node == node && self.wire_kind(r) == 12)
+        let peak = |r: usize| self.rho[r].iter().copied().fold(0.0_f64, f64::max);
+        let keys_of = |r: usize| match self.tag[r] {
+            Tag::Section { first, count } => &self.keys[first as usize..(first + count) as usize],
+            _ => &[],
+        };
+        (0..self.res.len())
+            .filter(|&r| self.res[r].node == node && self.wire_kind(r) == 12)
+            .max_by(|&a, &b| peak(a).total_cmp(&peak(b)).then_with(|| keys_of(a).cmp(keys_of(b))))
     }
 
     /// Trains an hour through a resource at a level, each line direction once.

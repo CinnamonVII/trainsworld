@@ -162,8 +162,17 @@ impl TrackApi {
     pub fn set_merge_lane(&mut self, node: u32, on: bool) -> u32 {
         let Some(mut d) = self.w.net.node_data(node) else { return self.refuse(Issue::NoSuchNode { node }) };
         let net = &self.w.net;
+        if net.node_ports[node as usize].n < 3 {
+            return self.refuse(Issue::NoSuchNode { node });
+        }
         if let Some(&c) = net.node_ports[node as usize].ends().iter().find(|&&c| net.edge_crossover[(c >> 1) as usize]) {
             return self.refuse(Issue::Crossover { edge: c >> 1 });
+        }
+        if !on && d.merge_lane && net.built_ports(node) >= 3 {
+            return self.refuse(Issue::NoSuchNode { node });
+        }
+        if d.merge_lane == on {
+            return 0;
         }
         d.merge_lane = on;
         let op = Op::Node { id: node, data: Some(d) };

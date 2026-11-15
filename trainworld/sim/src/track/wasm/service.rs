@@ -233,6 +233,11 @@ impl TrackApi {
     pub fn merge_lane_info(&mut self, node: u32) -> Vec<f64> {
         let mut out = vec![0.0; 12];
         let Some(d) = self.w.net.node_data(node) else { return out };
+        let net = &self.w.net;
+        let p = &net.node_ports[node as usize];
+        if p.n < 3 || p.ends().iter().any(|&c| net.edge_crossover[(c >> 1) as usize]) {
+            return out;
+        }
         out[1] = d.merge_lane as u8 as f64;
         if !d.merge_lane {
             let mut probe = d.clone();

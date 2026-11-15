@@ -165,7 +165,7 @@ export function JunctionInspector({ node }: { node: number }) {
           )}
         </>
       )}
-      {lane && (lane.merge || lane.on) && (
+      {!atCrossover && lane && (lane.merge || lane.on) && (
         <>
           <div class="h">{t("junctionInspector.mergeLane")}</div>
           <p class="note muted">{t("junctionInspector.mergeNote")}</p>
