@@ -25,7 +25,7 @@ export class StrokeCache {
   private prog: WebGLProgram;
   private uTex: WebGLUniformLocation | null;
   private samples: number;
-  /** where layers are drawn: multisampled renderbuffers, or (without MSAA) each layer's texture */
+  /** where layers are drawn: a multisampled color target per layer, or (without MSAA) each layer's texture */
   private drawFb: WebGLFramebuffer[] = [];
   private resolveFb: WebGLFramebuffer[] = [];
   private tex: WebGLTexture[] = [];
@@ -76,15 +76,7 @@ export class StrokeCache {
       return r;
     };
     const depth = rb(gl.DEPTH24_STENCIL8);
-    const colour = this.samples > 1 ? rb(gl.RGBA8) : null;
-    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-    if (colour) {
-      const fb = gl.createFramebuffer()!;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, colour);
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, depth);
-      this.drawFb.push(fb);
-    }
+    const msaa = this.samples > 1;
     for (let i = 0; i < this.layers; i++) {
       const t = gl.createTexture()!;
       gl.bindTexture(gl.TEXTURE_2D, t);
@@ -92,15 +84,25 @@ export class StrokeCache {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       this.tex.push(t);
-      const fb = gl.createFramebuffer()!;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      const rfb = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, rfb);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
-      if (!colour) {
+      this.resolveFb.push(rfb);
+      if (msaa) {
+        // Each MSAA layer keeps its own color renderbuffer: clearing a shared buffer in begin(1)
+        // right after end(0)'s blitFramebuffer drops tex[0] on ANGLE before it is sampled.
+        const colour = rb(gl.RGBA8);
+        const dfb = gl.createFramebuffer()!;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, dfb);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, colour);
         gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, depth);
-        this.drawFb.push(fb);
+        this.drawFb.push(dfb);
+      } else {
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, depth);
+        this.drawFb.push(rfb);
       }
-      this.resolveFb.push(fb);
     }
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
     gl.bindTexture(gl.TEXTURE_2D, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
@@ -120,7 +122,7 @@ export class StrokeCache {
   /** Draw layer `i` from here until `end`: its target bound and cleared, the viewport its size. */
   begin(i: number) {
     const gl = this.gl;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.drawFb[this.samples > 1 ? 0 : i]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.drawFb[i]);
     gl.viewport(0, 0, this.w, this.h);
     gl.clearColor(0, 0, 0, 0);
     gl.clearStencil(0);
@@ -132,7 +134,7 @@ export class StrokeCache {
   end(i: number, vp: readonly [number, number]) {
     const gl = this.gl;
     if (this.samples > 1) {
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.drawFb[0]);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.drawFb[i]);
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.resolveFb[i]);
       gl.blitFramebuffer(0, 0, this.w, this.h, 0, 0, this.w, this.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     }
