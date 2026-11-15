@@ -35,8 +35,10 @@ import { addIntercity } from "./demandSums";
 import { cellBox, cityReach, clusterView, reachView, splitClusters, type Box, type Cluster, type PopView } from "./demandClusters";
 import { DemandGpuContext } from "./webgpu/DemandGpuContext";
 
-/** True unless `aux`, `?perfOff=webgpu`, or adapter/device creation/health failed. */
+/** True unless `aux`, `?perfOff=webgpu`, disabled in Settings, or adapter/device creation/health failed. */
 let useWebGpu = true;
+let webgpuToggled = false;
+let gpuFailed = false;
 let gpuCtxPromise: Promise<DemandGpuContext | null> | null = null;
 let gpuCtx: DemandGpuContext | null = null;
 const apiGpuKeys = new WeakMap<DemandApi, number>();
@@ -83,29 +85,41 @@ async function withActivePass<T>(fn: () => Promise<T>): Promise<T> {
     if (dealt && !busy && !dead) {
       deal();
     }
+    if (!useWebGpu && gpuCtx) {
+      gpuCtx.dispose();
+      gpuCtx = null;
+      gpuCtxPromise = null;
+    }
   }
 }
 
 async function getGpuCtx(): Promise<DemandGpuContext | null> {
-  if (!useWebGpu || aux || !raw) return null;
+  if (!useWebGpu || gpuFailed || aux || !raw) return null;
   if (gpuCtx && !gpuCtx.isHealthy) {
     gpuCtx.dispose();
     gpuCtx = null;
-    useWebGpu = false;
+    gpuFailed = true;
     return null;
   }
   if (!gpuCtxPromise) {
     gpuCtxPromise = DemandGpuContext.create().then((ctx) => {
+      if (!ctx) gpuFailed = true;
+      if (!useWebGpu) {
+        ctx?.dispose();
+        gpuCtx = null;
+        gpuCtxPromise = null;
+        return null;
+      }
       gpuCtx = ctx;
-      if (!ctx) useWebGpu = false;
       return ctx;
     });
   }
   const ctx = await gpuCtxPromise;
+  if (!useWebGpu) return null;
   if (ctx && !ctx.isHealthy) {
     ctx.dispose();
     gpuCtx = null;
-    useWebGpu = false;
+    gpuFailed = true;
     return null;
   }
   return ctx;
@@ -131,8 +145,9 @@ async function runStagedGpuPass(a: DemandApi, ctx: DemandGpuContext): Promise<bo
       if (!ctx.isHealthy) {
         console.warn(`demand worker: WebGPU unhealthy (${ctx.failureReason ?? res.reason}), falling back to CPU`); // i18n-ignore
         ctx.dispose();
-        useWebGpu = false;
+        gpuFailed = true;
         gpuCtx = null;
+        gpuCtxPromise = null;
       }
       return false;
     }
@@ -154,8 +169,9 @@ async function runStagedGpuPass(a: DemandApi, ctx: DemandGpuContext): Promise<bo
     console.warn(`demand worker: WebGPU pass failed (${err}), falling back to CPU`); // i18n-ignore
     if (!ctx.isHealthy) {
       ctx.dispose();
-      useWebGpu = false;
+      gpuFailed = true;
       gpuCtx = null;
+      gpuCtxPromise = null;
     }
     return false;
   }
@@ -289,7 +305,7 @@ let stageRound = -1;
 /** T-327: questions marked `wait` about a round (or version) this worker has not reached yet,
  * answered the moment it has, before it starts the next round */
 let waiting: Query[] = [];
-type Query = Exclude<ToDemand, { kind: "init" | "open" | "solve" | "go" | "whole" | "close" | "corridorsAgain" | "debugPanic" | "periods" | "first" | "view" | "loads" }>;
+type Query = Exclude<ToDemand, { kind: "init" | "open" | "solve" | "go" | "whole" | "close" | "webgpu" | "corridorsAgain" | "debugPanic" | "periods" | "first" | "view" | "loads" }>;
 /** T-327: the round every worker may start, by version and group (a solve marked `barrier` waits
  * for it) */
 let go = { version: -1, group: 0, round: 0 };
@@ -1050,12 +1066,12 @@ onmessage = (e: MessageEvent<ToDemand>) => {
         if (msg.heapStep) set_heap_step(msg.heapStep);
         const t1 = performance.now();
         aux = !!msg.aux;
-        useWebGpu = !aux && !msg.noGpu;
+        useWebGpu = !aux && (webgpuToggled ? useWebGpu : !msg.noGpu);
         if (!useWebGpu) {
           gpuCtx?.dispose();
           gpuCtx = null;
           gpuCtxPromise = null;
-        } else {
+        } else if (!gpuFailed) {
           // Kick off adapter/device acquisition and async WGSL pipeline compilation immediately
           void getGpuCtx();
         }
@@ -1121,6 +1137,18 @@ onmessage = (e: MessageEvent<ToDemand>) => {
       let at = i;
       while (at > 0 && openQueue[at - 1].epoch === e.epoch && !openQueue[at - 1].msg.first) at--;
       openQueue.splice(at, 0, e);
+    }
+  } else if (msg.kind === "webgpu") {
+    webgpuToggled = true;
+    useWebGpu = !aux && !!msg.enabled;
+    if (!useWebGpu) {
+      if (!activePassPromise && gpuCtx) {
+        gpuCtx.dispose();
+        gpuCtx = null;
+        gpuCtxPromise = null;
+      }
+    } else if (!gpuFailed && started) {
+      void getGpuCtx();
     }
   } else if (msg.kind === "corridorsAgain") {
     sentTables.clear();

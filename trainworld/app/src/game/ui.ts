@@ -117,6 +117,8 @@ export interface DisplaySettings {
   /** T-2838: a phone or tablet calculates trips between cities too (the market opens); per browser, since it is
    * about the device. Read at each solve, so it applies from the next one. */
   mobileIntercity: boolean;
+  /** Whether demand mode-choice passes may use WebGPU compute when supported; false keeps solves on WASM CPU. */
+  webgpu: boolean;
   /** T-3319: the bullet shape of each mode's lines that have none of their own (game/lineShapeState.ts) */
   modeShapes: Record<Vehicle, LineShape>;
 }
@@ -168,6 +170,7 @@ const DEFAULT_DISPLAY: DisplaySettings = {
   zoomButtons: true,
   chartOtherLines: true,
   mobileIntercity: false,
+  webgpu: true,
   modeShapes: { ...MODE_SHAPES },
 };
 

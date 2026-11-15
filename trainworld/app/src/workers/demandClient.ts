@@ -835,6 +835,15 @@ class DemandClient {
       for (const w of this.workers) w.postMessage(v);
       this.fpool?.postAll(v);
     });
+    // Keep solving workers aligned with the WebGPU toggle in Settings (after initial spawn).
+    let firstWebGpu = true;
+    effect(() => {
+      const enabled = !perfOff("webgpu") && display.value.webgpu;
+      if (firstWebGpu) { firstWebGpu = false; return; }
+      const msg: ToDemand = { kind: "webgpu", enabled };
+      for (const w of this.workers) w.postMessage(msg);
+      this.fpool?.postAll(msg);
+    });
     // T-1533: a game load's first figures for the zone in view show the map behind the card
     effect(() => {
       const seq = gameLoadSeq.value;
@@ -877,7 +886,7 @@ class DemandClient {
     };
     w.onmessageerror = () => { const j = at(); if (j >= 0) this.fail(`worker ${j}: a message could not be read`); }; // i18n-ignore
     // T-325: the aux worker is told every solving worker's periods, for the zones it holds bare
-    const msg: ToDemand = { kind: "init", packs: [], periods: this.periodsOf[i], ...(i < n ? this.marketsMsg(i) : {}), aux: i === n, warmEveryday, ...(perfOff("inPlace") ? { copies: true } : {}), ...(perfOff("allSums") ? { allSums: true } : {}), ...(perfOff("webgpu") ? { noGpu: true } : {}), ...(i === n ? { groups: this.periodsOf.slice(0, n) } : {}), heapStep: heapStep() };
+    const msg: ToDemand = { kind: "init", packs: [], periods: this.periodsOf[i], ...(i < n ? this.marketsMsg(i) : {}), aux: i === n, warmEveryday, ...(perfOff("inPlace") ? { copies: true } : {}), ...(perfOff("allSums") ? { allSums: true } : {}), ...(perfOff("webgpu") || !display.peek().webgpu ? { noGpu: true } : {}), ...(i === n ? { groups: this.periodsOf.slice(0, n) } : {}), heapStep: heapStep() };
     w.postMessage(msg);
     return w;
   }
@@ -3003,7 +3012,7 @@ class DemandClient {
       message: (i, msg) => this.focusMessage(i, msg),
       opened: (id) => { (this.fopened ??= new Map()).set(id, performance.now()); this.focusSoon(); },
       failed: (why) => { console.warn(`demand: the focus pool stopped (${why})`); this.endFocus(); },
-    }, this.viewMsg(), perfOff("focusAux"));
+    }, this.viewMsg(), perfOff("focusAux"), perfOff("webgpu") || !display.peek().webgpu);
   }
 
   /** The load's whole solve has landed (or a cached result, a new network, a failure): the zones

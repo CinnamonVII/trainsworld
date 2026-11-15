@@ -40,14 +40,14 @@ export class FocusPool {
   /** the worker a question for an aux worker goes to: the pool's own aux, else its first solving worker */
   readonly auxAt: number;
 
-  constructor(readonly n: number, periodsOf: number[][], private hooks: FocusHooks, view: ToDemand, withAux: boolean) {
+  constructor(readonly n: number, periodsOf: number[][], private hooks: FocusHooks, view: ToDemand, withAux: boolean, noGpu = false) {
     this.auxAt = withAux ? n : 0;
     for (let i = 0; i < n + (withAux ? 1 : 0); i++) {
       const w = new Worker(new URL("./demand.worker.ts", import.meta.url), { type: "module" });
       w.onmessage = (e: MessageEvent<FromDemand>) => this.receive(i, e.data);
       w.onerror = (e) => this.fail(`focus worker ${i}: ${e.message}`); // i18n-ignore
       const aux = i === n;
-      w.postMessage({ kind: "init", packs: [], periods: aux ? [] : periodsOf[i], aux, warmEveryday: false, ...(aux ? { groups: periodsOf.slice(0, n) } : { markets: periodsOf[i], share: false }) } satisfies ToDemand);
+      w.postMessage({ kind: "init", packs: [], periods: aux ? [] : periodsOf[i], aux, warmEveryday: false, ...(noGpu ? { noGpu: true } : {}), ...(aux ? { groups: periodsOf.slice(0, n) } : { markets: periodsOf[i], share: false }) } satisfies ToDemand);
       w.postMessage(view);
       this.workers.push(w);
     }

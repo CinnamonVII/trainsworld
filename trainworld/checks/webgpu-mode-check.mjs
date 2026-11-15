@@ -750,11 +750,77 @@ try {
       });
     }
 
-    const [workerGpu, workerCpu, workerNoGpu, workerReentrancy] = await Promise.all([
+    async function runWebGpuToggleCheck() {
+      return await new Promise((resolve, reject) => {
+        const w = new Worker('/worker.js', { type: 'module' });
+        const byVer = {};
+        let resolved = false;
+        const fail = (msg) => {
+          if (!resolved) {
+            resolved = true;
+            w.terminate();
+            reject(new Error(msg));
+          }
+        };
+        w.onerror = (e) => fail(`Worker toggle error: ${e.message}`);
+        const postSolve = (version, tphScale, rounds) => {
+          const tph = new Float32Array(net.tph);
+          for (let i = 0; i < tph.length; i++) tph[i] *= tphScale;
+          w.postMessage({
+            kind: 'solve',
+            version,
+            net: {
+              frame: net.frame,
+              stXY: new Float32Array(net.stXY),
+              lineN: new Uint32Array(net.lineN),
+              stops: new Uint32Array(net.stops),
+              times: new Float32Array(net.times),
+              tph,
+              cars: new Float32Array(net.cars),
+              fare: net.fare,
+              hopKm: new Float32Array(net.hopKm),
+            },
+            rounds,
+          });
+        };
+        w.onmessage = ({ data: m }) => {
+          if (m.kind === 'failed' || m.kind === 'dead') return fail(`Worker toggle ${m.kind}: ${m.error}`);
+          if (m.kind === 'ready') {
+            postSolve(1, 1, 2);
+          } else if (m.kind === 'result' && !m.cluster && m.period === 0) {
+            byVer[m.version] = Array.from(m.citySummary?.nyc ?? m.summary);
+          } else if (m.kind === 'done') {
+            if (m.version === 1) {
+              w.postMessage({ kind: 'webgpu', enabled: false });
+              postSolve(2, 2, 1);
+            } else if (m.version === 2) {
+              postSolve(3, 1, 2);
+            } else if (m.version === 3) {
+              w.postMessage({ kind: 'webgpu', enabled: true });
+              postSolve(4, 2, 1);
+            } else if (m.version === 4) {
+              postSolve(5, 1, 2);
+            } else if (m.version === 5) {
+              resolved = true;
+              w.terminate();
+              resolve(byVer);
+            }
+          }
+        };
+        const binCopy = nycBuf.slice(0);
+        w.postMessage(
+          { kind: 'init', packs: [{ id: 'nyc', header: nycHdr, bin: binCopy }], periods: [0], noGpu: false },
+          [binCopy],
+        );
+      });
+    }
+
+    const [workerGpu, workerCpu, workerNoGpu, workerReentrancy, workerToggleRaw] = await Promise.all([
       runDedicatedWorker('/worker.js', false),
       runDedicatedWorker('/worker.js', true),
       runDedicatedWorker('/worker-nogpu.js', false),
       runWorkerReentrancyCheck(),
+      runWebGpuToggleCheck(),
     ]);
     const workerSummaryRel = {};
     const workerNoGpuSummaryRel = {};
@@ -775,6 +841,14 @@ try {
     }
     const workerSumsMaxRel = maxRel(workerGpu.sums[2], workerCpu.sums[2], 1.0).maxR;
     const workerNoGpuSumsMaxRel = maxRel(workerNoGpu.sums[2], workerCpu.sums[2], 1.0).maxR;
+
+    const workerToggle = {
+      gpu1: workerToggleRaw[1],
+      cpu3: workerToggleRaw[3],
+      gpu5: workerToggleRaw[5],
+      refGpu: workerGpu.summaries[0],
+      refCpu: workerCpu.summaries[0],
+    };
 
     return {
       ok: true,
@@ -800,6 +874,7 @@ try {
       workerSumsMaxRel,
       workerNoGpuSumsMaxRel,
       workerReentrancy,
+      workerToggle,
     };
   });
 
@@ -814,6 +889,15 @@ try {
   assert(report.emptyParity && report.emptyParity.subSumsMaxRel === 0, 'Empty network s=0 parity failed');
   assert(report.discParity && report.discParity.subSumsMaxRel <= 1e-5 && report.discParity.segL1Rel <= 1e-6, 'Disconnected lines parity failed');
   assert(report.workerReentrancy.done && report.workerReentrancy.interleavedCount === 0, `Worker re-entrancy interleaved=${report.workerReentrancy.interleavedCount}`);
+  {
+    const { gpu1, cpu3, gpu5, refGpu, refCpu } = report.workerToggle;
+    for (const idx of [2, 3, 10, 11, 12, 13]) {
+      assert.equal(gpu1[idx], refGpu[idx], `Initial GPU summary[${idx}] mismatch`);
+      assert.equal(cpu3[idx], refCpu[idx], `Runtime WebGPU-disabled summary[${idx}] should be bit-exact CPU`);
+      assert.equal(gpu5[idx], refGpu[idx], `Runtime WebGPU-re-enabled summary[${idx}] should be bit-exact GPU`);
+    }
+    assert.notEqual(refGpu[2], refCpu[2], 'Expected distinct GPU vs CPU float rounding on NYC rail');
+  }
 
   const assertParity = (label, cmp) => {
     for (const k of ['round', 'trips', 'rail', 'walk', 'pairs', 'segs_over_seats', 'max_load_of_crush', 'p50', 'p90', 'd', 'd_km', 'km', 'unr']) {

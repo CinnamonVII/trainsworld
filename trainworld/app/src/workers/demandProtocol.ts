@@ -125,7 +125,7 @@ export type ToDemand =
       /** T-1607: the periods whose market this worker solves in a solve with the barrier (`share`
        * true in every solving worker when any market sits apart from its period's cities) */
       markets?: number[]; share?: boolean;
-      /** Force WASM CPU mode choice instead of WebGPU (`?perfOff=webgpu`). */
+      /** Force WASM CPU mode choice instead of WebGPU (`?perfOff=webgpu` or disabled in Settings). */
       noGpu?: boolean }
   /** open more city packs and/or zones' market packs (T-149, T-377); answered by `opened`. A
    * market pack is its text or, from the page, its UTF-8 bytes (T-180: decoded in the worker; the
@@ -199,6 +199,8 @@ export type ToDemand =
    * zone in view and the nearby zones; none while the bubbles are off): a solve's `sums` for those
    * zones carry that day's too */
   | { kind: "view"; day: number; zones: CityId[] }
+  /** Enable or disable WebGPU demand compute at runtime from Settings. */
+  | { kind: "webgpu"; enabled: boolean }
   /** T-1008: the page has lost the corridor tables sent: the next results carry theirs again */
   | { kind: "corridorsAgain" }
   /** T-1174, dev server only (`twDemand.client.debugPanic`): make this worker's WASM panic, `now`

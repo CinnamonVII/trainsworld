@@ -26,6 +26,7 @@ import { FeedbackButton, FeedbackPanel } from "./FeedbackPanel";
 import { t, tNumber, type MessageKey } from "../i18n";
 import { LanguageSelect } from "./LanguageSelect";
 import { SideRow } from "./SideSwitch";
+import { perfOff } from "../perfFlags";
 import { probeWebGpuSupport, type WebGpuCapability } from "../workers/webgpu/probe";
 
 const THEME_NAME: Record<Theme, MessageKey> = { pink: "settingsTab.pink", blue: "settingsTab.blue", green: "settingsTab.green" };
@@ -194,6 +195,9 @@ export function SettingsTab() {
         <Check checked={d.runInBackground} onChange={(v) => setDisplay("runInBackground", v)}>
           {t("settingsTab.runInBackground")}
         </Check>
+        <Check checked={!perfOff("webgpu") && d.webgpu} onChange={(v) => { if (!perfOff("webgpu")) setDisplay("webgpu", v); }}>
+          <span data-tip={t("settingsTab.webgpuTip")}>{t("settingsTab.webgpu")}</span>
+        </Check>
         {mobileDevice() && (
           <Check checked={d.mobileIntercity} onChange={(v) => setDisplay("mobileIntercity", v)}>
             <span data-tip={t("settingsTab.mobileIntercityTip")}>{t("settingsTab.mobileIntercity")}</span>
@@ -239,27 +243,32 @@ function MemoryRow() {
 /** Detects whether this browser and GPU can run WebGPU compute acceleration. */
 function GpuComputeRow() {
   const [cap, setCap] = useState<WebGpuCapability | null>(null);
+  const off = perfOff("webgpu") || !display.value.webgpu;
   useEffect(() => {
     let alive = true;
     void probeWebGpuSupport().then((res) => { if (alive) setCap(res); });
     return () => { alive = false; };
   }, []);
-  const text = !cap
-    ? t("settingsTab.gpuChecking")
-    : !cap.canRun
-      ? t("settingsTab.gpuCannotRun")
-      : cap.status === "fallback-adapter" && cap.adapterName
-        ? t("settingsTab.gpuFallbackAdapter", { adapter: cap.adapterName })
-        : cap.adapterName
-          ? t("settingsTab.gpuCanRun", { adapter: cap.adapterName })
-          : t("settingsTab.gpuCanRunNoName");
-  const tip = !cap
-    ? undefined
-    : cap.canRun
-      ? t("settingsTab.gpuCanRunTip", { mib: String(cap.maxStorageMiB) })
-      : t("settingsTab.gpuCannotRunTip", { reason: cap.reason ?? "" });
-  const cls = !cap ? "muted" : cap.canRun ? (cap.status === "fallback-adapter" ? "" : "gpu-good") : "memory-bad";
-  return <div class="slider" data-gpu-support={cap ? (cap.canRun ? "yes" : "no") : "checking"} data-tip={tip}>
+  const text = off
+    ? t("settingsTab.gpuDisabled")
+    : !cap
+      ? t("settingsTab.gpuChecking")
+      : !cap.canRun
+        ? t("settingsTab.gpuCannotRun")
+        : cap.status === "fallback-adapter" && cap.adapterName
+          ? t("settingsTab.gpuFallbackAdapter", { adapter: cap.adapterName })
+          : cap.adapterName
+            ? t("settingsTab.gpuCanRun", { adapter: cap.adapterName })
+            : t("settingsTab.gpuCanRunNoName");
+  const tip = off
+    ? t("settingsTab.gpuDisabledTip")
+    : !cap
+      ? undefined
+      : cap.canRun
+        ? t("settingsTab.gpuCanRunTip", { mib: String(cap.maxStorageMiB) })
+        : t("settingsTab.gpuCannotRunTip", { reason: cap.reason ?? "" });
+  const cls = off || !cap ? "muted" : cap.canRun ? (cap.status === "fallback-adapter" ? "" : "gpu-good") : "memory-bad";
+  return <div class="slider" data-gpu-support={off ? "off" : cap ? (cap.canRun ? "yes" : "no") : "checking"} data-tip={tip}>
     <span>{t("settingsTab.gpuCompute")}</span>
     <span class={"num " + cls}>{text}</span>
   </div>;
