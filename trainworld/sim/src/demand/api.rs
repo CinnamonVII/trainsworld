@@ -91,6 +91,11 @@ pub(crate) fn put_fare_curve(g: &mut Graph, knots: &[f32], hop_km: &[f32], fare_
 /// Each ride edge's distance fare (`per_km` a fare km, perceived minutes) times its route node's
 /// multiplier in `mul` (T-1626; empty: all 1), and the fare curve (`put_fare_curve`).
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn od_sym_factors(q: usize) -> (f32, f32) {
+    let (w, h) = (TO_WORK[q], TO_HOME[q]);
+    (w / (w + h), h / (w + h))
+}
+
 pub(crate) fn put_fares(g: &mut Graph, knots: &[f32], hop_km: &[f32], mul: &[f32], fare_min: f32, per_km: f32, fare_w: f32) {
     let km = |r: usize| hop_km.get(r).copied().unwrap_or(0.0);
     let m = |r: usize| mul.get(r).copied().unwrap_or(1.0);
@@ -391,35 +396,35 @@ pub(crate) struct Period {
     pub(crate) p: Params,
     pub(crate) g: Graph,
     /// Loads averaged over the rounds so far.
-    avg: Loads,
-    rail: f64,
+    pub(crate) avg: Loads,
+    pub(crate) rail: f64,
     /// T-1300: `ModeOut::sense`, averaged like `rail`
-    rail_d: FareSense,
+    pub(crate) rail_d: FareSense,
     /// T-2365: `ModeOut::len`, averaged like `rail`
-    len: LenOut,
-    walk: f64,
+    pub(crate) len: LenOut,
+    pub(crate) walk: f64,
     /// T-2214: trips no way serves (between two land parts, not by rail), as `walk`.
-    unr: f64,
-    trips: f64,
+    pub(crate) unr: f64,
+    pub(crate) trips: f64,
     pub(crate) round: usize,
-    ms: f64,
-    pairs: u64,
+    pub(crate) ms: f64,
+    pub(crate) pairs: u64,
     /// Where the rail trips come from and go to, averaged like the loads (T-078's demand views).
     pub(crate) sub: SubOut,
     /// The crowding factors the last pass was solved with, and whether every pass so far used
     /// these same ones (free flow is all ones). Then another pass with them would give exactly
     /// the loads already averaged in, so the round is skipped (T-119).
-    fac: Vec<f32>,
-    uniform: bool,
+    pub(crate) fac: Vec<f32>,
+    pub(crate) uniform: bool,
     /// The segment loads the last crowding round was priced on (`kernel::settled`, T-434).
-    seen: Vec<f32>,
+    pub(crate) seen: Vec<f32>,
     /// Transfers platform to platform (T-176): the slots of `g`, averaged like the loads.
-    xi: XferIndex,
-    xfer: Vec<f32>,
+    pub(crate) xi: XferIndex,
+    pub(crate) xfer: Vec<f32>,
     /// T-1543: the part of the origins solved (`DemandApi::part`). A part's figures add up with
     /// the other parts' to the whole's: the trips and the walking with no rail are the first
     /// part's alone, and each part's walking is less the walkers its own rail trips take.
-    part: (u32, u32),
+    pub(crate) part: (u32, u32),
 }
 
 /// A pass's rail trips by place (`kernel::ModeOut`), both directions of the period's commutes
@@ -446,8 +451,22 @@ pub(crate) struct SubOut {
 }
 
 impl SubOut {
-    fn empty() -> SubOut {
+    pub(crate) fn empty() -> SubOut {
         SubOut { rail_home: vec![], rail_work: vec![], walk_lost_home: vec![], walk_lost_work: vec![], unr_lost_home: vec![], unr_lost_work: vec![], acc_home: vec![], acc_work: vec![], od: vec![] }
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        rail_home: Vec<f32>,
+        rail_work: Vec<f32>,
+        walk_lost_home: Vec<f32>,
+        walk_lost_work: Vec<f32>,
+        unr_lost_home: Vec<f32>,
+        unr_lost_work: Vec<f32>,
+        acc_home: Vec<f32>,
+        acc_work: Vec<f32>,
+        od: Vec<f32>,
+    ) -> SubOut {
+        SubOut { rail_home, rail_work, walk_lost_home, walk_lost_work, unr_lost_home, unr_lost_work, acc_home, acc_work, od }
     }
     /// Every figure times `k` (T-1538's estimate of one period from another).
     fn scaled(&self, k: f32) -> SubOut {
@@ -455,7 +474,7 @@ impl SubOut {
         SubOut { rail_home: s(&self.rail_home), rail_work: s(&self.rail_work), walk_lost_home: s(&self.walk_lost_home), walk_lost_work: s(&self.walk_lost_work), unr_lost_home: s(&self.unr_lost_home), unr_lost_work: s(&self.unr_lost_work), acc_home: s(&self.acc_home), acc_work: s(&self.acc_work), od: s(&self.od) }
     }
     /// T-2214: the rail trips between two land parts in all.
-    fn unr_rail(&self) -> f64 {
+    pub(crate) fn unr_rail(&self) -> f64 {
         self.unr_lost_home.iter().map(|&x| x as f64).sum()
     }
     /// Subzone `u`'s `unr_lost_home` or `unr_lost_work` (0 with no parts).
@@ -463,7 +482,7 @@ impl SubOut {
     fn unr_lost(&self, home: bool, u: usize) -> f32 {
         (if home { &self.unr_lost_home } else { &self.unr_lost_work }).get(u).copied().unwrap_or(0.0)
     }
-    fn msa(&mut self, new: &SubOut, round: usize) {
+    pub(crate) fn msa(&mut self, new: &SubOut, round: usize) {
         msa(&mut self.rail_home, &new.rail_home, round);
         msa(&mut self.rail_work, &new.rail_work, round);
         msa(&mut self.walk_lost_home, &new.walk_lost_home, round);
@@ -513,13 +532,13 @@ pub struct DemandApi {
     /// the same by home zone and by work zone.
     /// T-2214: by slot of the pack's land parts (`kernel::Parts`, `DemandApi::slot`; by zone with
     /// none).
-    walk_all: f64,
+    pub(crate) walk_all: f64,
     walk_home_zone: Vec<f64>,
     walk_work_zone: Vec<f64>,
     /// T-2214: all-day home -> work trips between two land parts, which no way but rail serves, in
     /// all and by slot at the home end and at the work end (empty with no parts).
-    unr_all: f64,
-    unr_home: Vec<f64>,
+    pub(crate) unr_all: f64,
+    pub(crate) unr_home: Vec<f64>,
     unr_work: Vec<f64>,
     /// T-276: per zone, the pack's trips a day per unit of home weight (`city.pop`) and of work
     /// weight (`city.jobs`). One number everywhere for a pack's own gravity; with a joint gravity
@@ -530,7 +549,7 @@ pub struct DemandApi {
     pub(crate) svc: Option<Service>,
     pub(crate) sz: Option<Subzones>,
     /// The stations a trip can end at (`egress_stations`): the only ones strategies are searched to.
-    want: Vec<bool>,
+    pub(crate) want: Vec<bool>,
     /// The stations in the subzones' access lists, ascending, and each station's place among them
     /// (`u32::MAX` if absent): the rows and columns of `SubOut::od`.
     od_st: Vec<u32>,
@@ -567,6 +586,13 @@ pub struct DemandApi {
     pub(crate) part: (u32, u32),
     /// T-2365: the day's commutes by length (`len_base`), worked out on first use.
     len_base: std::cell::OnceCell<LenBase>,
+    /// Phase 0/benchmark instrumentation: `[skims_ms, station_exp_ms, mode_choice_ms, od_sym_ms, assign_ms]` of the last `pass`.
+    pub(crate) last_pass_ms: std::cell::Cell<[f64; 5]>,
+    pub(crate) gpu_net: Option<super::gpu_stage::GpuNetworkStage>,
+    pub(crate) gpu_per: Vec<super::gpu_stage::GpuPeriodStage>,
+    pub(crate) staged_gpu: Option<super::gpu_stage::StagedGpuPass>,
+    pub(crate) gpu_net_epoch: u64,
+    pub(crate) last_gpu_rail_band: std::cell::Cell<[f64; super::kernel::N_BANDS]>,
 }
 
 /// T-2365: a pack's commutes a day by length with no network: all, walking, and between two land
@@ -608,7 +634,7 @@ pub fn release_skims() {
 }
 
 impl DemandApi {
-    fn params(&self, q: usize) -> Params {
+    pub(crate) fn params(&self, q: usize) -> Params {
         let (h0, h1) = PERIOD_HOURS[q];
         Params {
             period: q,
@@ -675,10 +701,14 @@ impl DemandApi {
     fn pass(&self, g: &Graph, p: &Params, q: usize, xfer: Option<(&XferIndex, &mut [f32])>) -> (f64, f64, Loads, u64, SubOut, FareSense, LenOut) {
         let sz = self.sz.as_ref().unwrap();
         // the strategies are shared with the other populations on the same service (T-119)
+        let t_skim0 = now_ms();
         let (mo, l, od_sub) = with_skims(g, p, &self.want, |sk| {
+            let t_er0 = now_ms();
             let er = station_exp(sk, p);
+            let t_mc0 = now_ms();
             let mut mo = mode_choice_part(&self.z, &self.gr, sz, &er, &sk.walk, &sk.walk_max, g.n_st, p, &self.nr, self.part);
             drop(er);
+            let t_sym0 = now_ms();
             // the trips home: the same station pairs reversed
             let s = g.n_st;
             let (w, h) = (TO_WORK[q], TO_HOME[q]);
@@ -693,10 +723,19 @@ impl DemandApi {
                     od[t * s + a] = fw * y + fh * x;
                 }
             }
+            let t_as0 = now_ms();
             let l = match xfer {
                 Some((ix, x)) => assign_with_transfers(g, sk, &od, ix, x),
                 None => assign(g, sk, &od),
             };
+            let t_end = now_ms();
+            self.last_pass_ms.set([
+                t_er0 - t_skim0,
+                t_mc0 - t_er0,
+                t_sym0 - t_mc0,
+                t_as0 - t_sym0,
+                t_end - t_as0,
+            ]);
             (mo, l, od_sub)
         });
         let sub = SubOut {
@@ -1005,6 +1044,12 @@ impl DemandApi {
             lod: self.lod,
             part: (0, 1),
             len_base: std::cell::OnceCell::new(),
+            last_pass_ms: std::cell::Cell::new([0.0; 5]),
+            gpu_net: None,
+            gpu_per: vec![],
+            staged_gpu: None,
+            gpu_net_epoch: 0,
+            last_gpu_rail_band: std::cell::Cell::new([0.0; super::kernel::N_BANDS]),
         }
     }
     /// The home weights access and subzones are built on (`with_weights`).
@@ -1110,7 +1155,7 @@ impl DemandApi {
         let (home_k, work_k) = zone_trip_factors(&city, &z, &gr, gravity_from_pack);
         // read only above; z and gr hold what the solves need of it (T-1611)
         city.gravity = None;
-        Ok(DemandApi { city: Arc::new(city), z: Arc::new(z), gr: Arc::new(gr), weights: None, base, nr, walk_all, walk_home_zone: ns.walk_home, walk_work_zone: ns.walk_work, unr_all, unr_home: ns.unr_home, unr_work: ns.unr_work, home_k, work_k, svc: None, sz: None, want: vec![], od_st: vec![], od_at: vec![], per: (0..PERIODS).map(|_| None).collect(), fare_per_km: 0.0, fare_km: vec![], fare_mul: vec![], fare_curve: vec![], open_ms: now_ms() - t0, complex_in: vec![], ups_in: vec![], passages_in: vec![], span_in: vec![], bus_in: (vec![], vec![]), tram_in: vec![], same: 0, layout_same: false, reusable: false, lod: Lod::of(lod::FINE)?, part: (0, 1), len_base: std::cell::OnceCell::new() })
+        Ok(DemandApi { city: Arc::new(city), z: Arc::new(z), gr: Arc::new(gr), weights: None, base, nr, walk_all, walk_home_zone: ns.walk_home, walk_work_zone: ns.walk_work, unr_all, unr_home: ns.unr_home, unr_work: ns.unr_work, home_k, work_k, svc: None, sz: None, want: vec![], od_st: vec![], od_at: vec![], per: (0..PERIODS).map(|_| None).collect(), fare_per_km: 0.0, fare_km: vec![], fare_mul: vec![], fare_curve: vec![], open_ms: now_ms() - t0, complex_in: vec![], ups_in: vec![], passages_in: vec![], span_in: vec![], bus_in: (vec![], vec![]), tram_in: vec![], same: 0, layout_same: false, reusable: false, lod: Lod::of(lod::FINE)?, part: (0, 1), len_base: std::cell::OnceCell::new(), last_pass_ms: std::cell::Cell::new([0.0; 5]), gpu_net: None, gpu_per: vec![], staged_gpu: None, gpu_net_epoch: 0, last_gpu_rail_band: std::cell::Cell::new([0.0; super::kernel::N_BANDS]) })
     }
 
     /// `new` at a level of detail (T-1222, `lod::FINE` or `lod::COARSE`): the commute chunks
@@ -1181,6 +1226,11 @@ impl DemandApi {
         }
     }
 
+    /// `[skims_ms, station_exp_ms, mode_choice_ms, od_sym_ms, assign_ms]` of the last `pass`.
+    pub fn last_pass_timings(&self) -> Vec<f64> {
+        self.last_pass_ms.get().to_vec()
+    }
+
     /// Cells, zones, home -> work trips a day, the walk share of all trips with no rail at all,
     /// the ms the constructor took, and (T-2214) the home -> work trips a day between two land
     /// parts, which no way but rail serves.
@@ -1245,6 +1295,9 @@ impl DemandApi {
             }
         }
         if !self.layout_same {
+            self.gpu_net = None;
+            self.gpu_per.clear();
+            self.staged_gpu = None;
             self.fare_km.clear();
             self.fare_mul.clear();
             self.sz = None;
@@ -1379,6 +1432,9 @@ impl DemandApi {
         self.want.clear();
         self.od_st.clear();
         self.od_at.clear();
+        self.gpu_net = None;
+        self.gpu_per.clear();
+        self.staged_gpu = None;
         clear_skim_cache();
         now_ms() - t0
     }
@@ -2350,6 +2406,112 @@ impl DemandApi {
             }
         }
         out
+    }
+
+    /// Stage period `q`'s free-flow pass for WebGPU execution (`0` = empty/fallback, `1` = staged,
+    /// `2` = already completed synchronously).
+    pub fn gpu_prepare_solve(&mut self, q: usize) -> i32 {
+        self.prepare_solve_gpu_inner(q)
+    }
+
+    /// Stage period `q`'s crowding round against `total` for WebGPU (`0` = invalid/fallback,
+    /// `1` = staged, `2` = already settled / no GPU work needed).
+    pub fn gpu_prepare_crowd(&mut self, q: usize, total: &[f32]) -> i32 {
+        self.prepare_crowd_gpu_inner(q, total)
+    }
+
+    /// Roll back any staged GPU pass cleanly without mutating solved state.
+    pub fn gpu_abort_pass(&mut self) {
+        self.abort_gpu_inner();
+    }
+
+    /// Descriptor words `[net_epoch, period_idx, n_visits, ptr/len pairs...]` for zero-copy
+    /// `WebGPU` uploads from WASM linear memory.
+    pub fn gpu_stage_descriptors(&self) -> Vec<u32> {
+        let (Some(ns), Some(st)) = (self.gpu_net.as_ref(), self.staged_gpu.as_ref()) else {
+            return vec![];
+        };
+        let Some(ps) = self.gpu_per.get(st.period_idx) else {
+            return vec![];
+        };
+        vec![
+            self.gpu_net_epoch as u32,
+            st.period_idx as u32,
+            ps.n_visits as u32,
+            ns.net_f32.as_ptr() as usize as u32,
+            ns.net_f32.len() as u32,
+            ns.net_u32.as_ptr() as usize as u32,
+            ns.net_u32.len() as u32,
+            ps.visit_f32.as_ptr() as usize as u32,
+            ps.visit_f32.len() as u32,
+            ps.visit_u32.as_ptr() as usize as u32,
+            ps.visit_u32.len() as u32,
+            ps.ou_period.as_ptr() as usize as u32,
+            ps.ou_period.len() as u32,
+            ps.oz_visit_off.as_ptr() as usize as u32,
+            ps.oz_visit_off.len() as u32,
+            st.sk_r.as_ptr() as usize as u32,
+            st.sk_r.len() as u32,
+            st.sk_walk_u32.as_ptr() as usize as u32,
+            st.sk_walk_u32.len() as u32,
+            st.sk_walk_max.as_ptr() as usize as u32,
+            st.sk_walk_max.len() as u32,
+        ]
+    }
+
+    /// `GpuNetworkStage::meta` header words (`NET_META_LEN`).
+    pub fn gpu_net_meta(&self) -> Vec<u32> {
+        self.gpu_net
+            .as_ref()
+            .map(|n| n.meta.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Packed scalar uniforms for the currently staged GPU pass (`56` `f32`/bitcast-`u32` words).
+    pub fn gpu_pass_uniforms(&self) -> Vec<f32> {
+        let (Some(ns), Some(st)) = (self.gpu_net.as_ref(), self.staged_gpu.as_ref()) else {
+            return vec![];
+        };
+        let rule = st.period.p.walk_rule > 0.0
+            && st.sk_walk_len == ns.s * ns.s
+            && st.sk_walk_max.len() == ns.s;
+        super::gpu_stage::build_pass_uniforms_f32(&st.period.p, ns, rule)
+    }
+
+    /// Commit WebGPU `mode_choice` results into symmetric OD, assignment, and MSA/Period state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_commit_pass(
+        &mut self,
+        od: &[f32],
+        acc_home: &[f32],
+        acc_q_flat: &[f32],
+        rail_by_sub: &[f32],
+        walk_lost_by_sub: &[f32],
+        unr_lost_by_sub: &[f32],
+        u_sense: &[f32],
+        lost_q: &[f32],
+        unr_q: &[f32],
+        rail_band: &[f32],
+        len_flat: &[f32],
+    ) -> bool {
+        self.commit_gpu_inner(
+            od,
+            acc_home,
+            acc_q_flat,
+            rail_by_sub,
+            walk_lost_by_sub,
+            unr_lost_by_sub,
+            u_sense,
+            lost_q,
+            unr_q,
+            rail_band,
+            len_flat,
+        )
+    }
+
+    /// Diagnostic: `rail_band` of the last committed GPU pass.
+    pub fn last_gpu_rail_band(&self) -> Vec<f64> {
+        self.last_gpu_rail_band.get().to_vec()
     }
 }
 

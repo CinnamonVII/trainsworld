@@ -167,6 +167,11 @@ impl LenKernel {
         LenKernel { zone_km, off, ent }
     }
 
+    /// Read-only access to CSR tables `(zone_km, off, ent)` for GPU length-bin staging.
+    pub(crate) fn tables(&self) -> (f32, &[u32], &[(u16, f32, f32)]) {
+        (self.zone_km, &self.off, &self.ent)
+    }
+
     /// Add `x` trips between zones whose centres are (`hdx`, `hdy`) half squares apart, of sides
     /// `si` and `sj` squares, into `out` (`LenSums`).
     #[inline]

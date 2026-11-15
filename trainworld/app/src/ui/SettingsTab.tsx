@@ -26,6 +26,7 @@ import { FeedbackButton, FeedbackPanel } from "./FeedbackPanel";
 import { t, tNumber, type MessageKey } from "../i18n";
 import { LanguageSelect } from "./LanguageSelect";
 import { SideRow } from "./SideSwitch";
+import { probeWebGpuSupport, type WebGpuCapability } from "../workers/webgpu/probe";
 
 const THEME_NAME: Record<Theme, MessageKey> = { pink: "settingsTab.pink", blue: "settingsTab.blue", green: "settingsTab.green" };
 const SHADE_NAME: Record<Shade, MessageKey> = { light: "settingsTab.light", dark: "settingsTab.dark" };
@@ -200,6 +201,7 @@ export function SettingsTab() {
         )}
       </div>
       <MemoryRow />
+      <GpuComputeRow />
       <GameMode />
       <div class="h">{t("settingsTab.lineShapes")}</div>
       <div class="shape-grid">
@@ -231,6 +233,35 @@ function MemoryRow() {
   return <div class="slider" data-tip={t("settingsTab.memoryTip", { budget: gbText(budget) })}>
     <span>{t("settingsTab.memory")}</span>
     <span class={"num" + (used > 0.85 * budget ? " memory-bad" : "")}>{t("settingsTab.memoryValue", { used: gbText(used), budget: gbText(budget) })}</span>
+  </div>;
+}
+
+/** Detects whether this browser and GPU can run WebGPU compute acceleration. */
+function GpuComputeRow() {
+  const [cap, setCap] = useState<WebGpuCapability | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void probeWebGpuSupport().then((res) => { if (alive) setCap(res); });
+    return () => { alive = false; };
+  }, []);
+  const text = !cap
+    ? t("settingsTab.gpuChecking")
+    : !cap.canRun
+      ? t("settingsTab.gpuCannotRun")
+      : cap.status === "fallback-adapter" && cap.adapterName
+        ? t("settingsTab.gpuFallbackAdapter", { adapter: cap.adapterName })
+        : cap.adapterName
+          ? t("settingsTab.gpuCanRun", { adapter: cap.adapterName })
+          : t("settingsTab.gpuCanRunNoName");
+  const tip = !cap
+    ? undefined
+    : cap.canRun
+      ? t("settingsTab.gpuCanRunTip", { mib: String(cap.maxStorageMiB) })
+      : t("settingsTab.gpuCannotRunTip", { reason: cap.reason ?? "" });
+  const cls = !cap ? "muted" : cap.canRun ? (cap.status === "fallback-adapter" ? "" : "gpu-good") : "memory-bad";
+  return <div class="slider" data-gpu-support={cap ? (cap.canRun ? "yes" : "no") : "checking"} data-tip={tip}>
+    <span>{t("settingsTab.gpuCompute")}</span>
+    <span class={"num " + cls}>{text}</span>
   </div>;
 }
 

@@ -1,6 +1,6 @@
 // Production WASM checks, independent of browser automation.
 import assert from 'node:assert/strict';
-import {readFileSync,writeFileSync} from 'node:fs';
+import {existsSync,readFileSync,writeFileSync} from 'node:fs';
 import init,{EverydayApi,DemandApi} from '../app/src/wasm/demand/sim.js';
 await init({module_or_path:readFileSync(new URL('../app/src/wasm/demand/sim_bg.wasm',import.meta.url))});
 const close=(a,b,label)=>assert(Math.abs(a-b)<2e-4*Math.max(1,Math.abs(b)),`${label}: ${a} != ${b}`);
@@ -51,8 +51,9 @@ full.set_fares(100,10,new Float32Array([4,4,0,0,4,4]));for(let q=0;q<5;q++)full.
 assert(sum(Array.from({length:5},(_,q)=>full.summary(q)[2]))<preFare/10);
 for(const a of [full,one,two,commute])a.free();
 
-const header=readFileSync(new URL('../data/packs/nyc.json',import.meta.url),'utf8');
-const bin=readFileSync(new URL('../data/packs/nyc.bin',import.meta.url));
+const packDir=existsSync(new URL('../data/packs/nyc.json',import.meta.url))?'../data/packs':'../data-test/packs';
+const header=readFileSync(new URL(`${packDir}/nyc.json`,import.meta.url),'utf8');
+const bin=readFileSync(new URL(`${packDir}/nyc.bin`,import.meta.url));
 let t=performance.now();const real=new EverydayApi(header,bin);const openMs=performance.now()-t;
 const info=Array.from(real.info()), n=JSON.parse(header).cells;
 real.set_network(new Float32Array(),new Uint32Array(),new Uint32Array(),new Float32Array(),new Float32Array(),new Float32Array());

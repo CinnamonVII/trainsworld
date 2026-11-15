@@ -53,7 +53,7 @@ pub const N_BANDS: usize = 13;
 pub const COMMUTE_CHUNK: f32 = 0.1;
 /// T-874: the side of the blocks of destination zones (16 km for 2 km zones) within which an
 /// origin zone's small commute pairs are dealt their trips in chunks (`Params::commute_chunk`).
-pub(super) const CHUNK_BLOCK: i32 = 8;
+pub const CHUNK_BLOCK: i32 = 8;
 
 /// The band of `DIST_BANDS_KM` a straight-line distance in metres falls in.
 pub fn dist_band(d_m: f32) -> usize {

@@ -33,6 +33,173 @@ import type { CorridorTable } from "../game/demand";
 import { ALL_PERIODS, arriveOf, comeMax, MARKET_TRIP_LAYOUT, TRIP_LAYOUT, type BareFigures, type DemandNetwork, type FromDemand, type Heap, type MarketPack, type MarketRows, type OpenRejected, type ToDemand } from "./demandProtocol";
 import { addIntercity } from "./demandSums";
 import { cellBox, cityReach, clusterView, reachView, splitClusters, type Box, type Cluster, type PopView } from "./demandClusters";
+import { DemandGpuContext } from "./webgpu/DemandGpuContext";
+
+/** True unless `aux`, `?perfOff=webgpu`, or adapter/device creation/health failed. */
+let useWebGpu = true;
+let gpuCtxPromise: Promise<DemandGpuContext | null> | null = null;
+let gpuCtx: DemandGpuContext | null = null;
+const apiGpuKeys = new WeakMap<DemandApi, number>();
+let nextApiGpuKey = 1;
+
+function gpuKeyOf(api: DemandApi): number {
+  let k = apiGpuKeys.get(api);
+  if (k === undefined) {
+    k = nextApiGpuKey++;
+    apiGpuKeys.set(api, k);
+  }
+  return k;
+}
+
+function invalidateGpuApi(api: DemandApi): void {
+  const k = apiGpuKeys.get(api);
+  if (k !== undefined) gpuCtx?.invalidateApi(k);
+}
+
+/** Re-entrancy gate for async GPU passes so `open`/`close`/`periods`/`query` cannot run mid-pass. */
+let activePassPromise: Promise<void> | null = null;
+const midPassQueries: Query[] = [];
+
+async function withActivePass<T>(fn: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  activePassPromise = new Promise<void>((r) => {
+    release = r;
+  });
+  try {
+    return await fn();
+  } finally {
+    activePassPromise = null;
+    release();
+    if (midPassQueries.length > 0 && !dead) {
+      const queued = midPassQueries.splice(0, midPassQueries.length);
+      for (const qMsg of queued) {
+        try {
+          query(qMsg);
+        } catch (err) {
+          failed(err);
+        }
+      }
+    }
+    if (dealt && !busy && !dead) {
+      deal();
+    }
+  }
+}
+
+async function getGpuCtx(): Promise<DemandGpuContext | null> {
+  if (!useWebGpu || aux || !raw) return null;
+  if (gpuCtx && !gpuCtx.isHealthy) {
+    gpuCtx.dispose();
+    gpuCtx = null;
+    useWebGpu = false;
+    return null;
+  }
+  if (!gpuCtxPromise) {
+    gpuCtxPromise = DemandGpuContext.create().then((ctx) => {
+      gpuCtx = ctx;
+      if (!ctx) useWebGpu = false;
+      return ctx;
+    });
+  }
+  const ctx = await gpuCtxPromise;
+  if (ctx && !ctx.isHealthy) {
+    ctx.dispose();
+    gpuCtx = null;
+    useWebGpu = false;
+    return null;
+  }
+  return ctx;
+}
+
+async function runStagedGpuPass(a: DemandApi, ctx: DemandGpuContext): Promise<boolean> {
+  if (!raw) return false;
+  const descriptors = a.gpu_stage_descriptors();
+  const netMeta = a.gpu_net_meta();
+  const passUniforms = a.gpu_pass_uniforms();
+  if (descriptors.length === 0 || netMeta.length === 0 || passUniforms.length === 0) {
+    return false;
+  }
+  try {
+    const res = await ctx.runModeChoicePass({
+      apiKey: gpuKeyOf(a),
+      descriptors,
+      netMeta,
+      passUniforms,
+      wasmMemory: raw.memory,
+    });
+    if (!res.ok || !res.outputs) {
+      if (!ctx.isHealthy) {
+        console.warn(`demand worker: WebGPU unhealthy (${ctx.failureReason ?? res.reason}), falling back to CPU`); // i18n-ignore
+        ctx.dispose();
+        useWebGpu = false;
+        gpuCtx = null;
+      }
+      return false;
+    }
+    const o = res.outputs;
+    return a.gpu_commit_pass(
+      o.od,
+      o.accHome,
+      o.accQFlat,
+      o.railBySub,
+      o.walkLostBySub,
+      o.unrLostBySub,
+      o.uSense,
+      o.lostQ,
+      o.unrQ,
+      o.railBand,
+      o.lenFlat,
+    );
+  } catch (err) {
+    console.warn(`demand worker: WebGPU pass failed (${err}), falling back to CPU`); // i18n-ignore
+    if (!ctx.isHealthy) {
+      ctx.dispose();
+      useWebGpu = false;
+      gpuCtx = null;
+    }
+    return false;
+  }
+}
+
+async function solvePop(a: Population, q: number): Promise<void> {
+  await withActivePass(async () => {
+    if (a instanceof DemandApi) {
+      const ctx = await getGpuCtx();
+      if (ctx) {
+        const staged = a.gpu_prepare_solve(q);
+        if (staged === 2) return;
+        if (staged === 1) {
+          const committed = await runStagedGpuPass(a, ctx);
+          if (committed) return;
+          a.gpu_abort_pass();
+        } else if (staged !== 0) {
+          a.gpu_abort_pass();
+        }
+      }
+    }
+    a.solve(q);
+  });
+}
+
+async function crowdPop(a: Population, q: number, own: Float32Array): Promise<boolean> {
+  return await withActivePass(async () => {
+    if (a instanceof DemandApi) {
+      const ctx = await getGpuCtx();
+      if (ctx) {
+        const staged = a.gpu_prepare_crowd(q, own);
+        if (staged === 2) return true;
+        if (staged === 1) {
+          const committed = await runStagedGpuPass(a, ctx);
+          if (committed) return true;
+          a.gpu_abort_pass();
+        } else if (staged !== 0) {
+          a.gpu_abort_pass();
+        }
+      }
+    }
+    return a.crowd_with_external(q, own);
+  });
+}
 
 /** WASM started (and the market opened if `init` carried it): `open` and solves wait for this. */
 let started = false;
@@ -738,7 +905,7 @@ function forget(pops: Population[]) {
     c.pops = c.pops.filter((p) => !gone.has(p));
     c.solveOrder = c.solveOrder.filter((p) => !gone.has(p));
   }
-  for (const p of gone) { held.delete(p); heldQ.delete(p); disturbed(p); p.free(); }
+  for (const p of gone) { held.delete(p); heldQ.delete(p); disturbed(p); if (p instanceof DemandApi) invalidateGpuApi(p); p.free(); }
 }
 
 function dropCity(id: CityId) {
@@ -813,7 +980,10 @@ let allSums = false;
 function openQueued(epoch: number): Promise<void> {
   // a macrotask, so the opens already posted are delivered and join this one; T-1533: not while a
   // rough solve of the zone in view runs
-  return new Promise<void>((r) => setTimeout(r, 0)).then(() => roughRun ?? undefined).then(() => {
+  return new Promise<void>((r) => setTimeout(r, 0)).then(async () => {
+    while (roughRun || activePassPromise) {
+      await (roughRun ?? activePassPromise);
+    }
     let first = openQueue[0];
     // taken up by an earlier batch, or after a close that comes before it in the chain
     if (!first || first.epoch !== epoch) return;
@@ -880,6 +1050,15 @@ onmessage = (e: MessageEvent<ToDemand>) => {
         if (msg.heapStep) set_heap_step(msg.heapStep);
         const t1 = performance.now();
         aux = !!msg.aux;
+        useWebGpu = !aux && !msg.noGpu;
+        if (!useWebGpu) {
+          gpuCtx?.dispose();
+          gpuCtx = null;
+          gpuCtxPromise = null;
+        } else {
+          // Kick off adapter/device acquisition and async WGSL pipeline compilation immediately
+          void getGpuCtx();
+        }
         copies = !!msg.copies;
         allSums = !!msg.allSums;
         mine = msg.periods;
@@ -913,7 +1092,8 @@ onmessage = (e: MessageEvent<ToDemand>) => {
   } else if (msg.kind === "close") {
     closeEpoch++;
     // in the opening chain, so a close and a reopen of the same pack keep their order
-    opening = opening.then(() => {
+    opening = opening.then(async () => {
+      while (activePassPromise) await activePassPromise;
       if (!started || dead) return;
       try { closePacks(msg); } catch (err) { failed(err); }
     });
@@ -947,7 +1127,7 @@ onmessage = (e: MessageEvent<ToDemand>) => {
     tableAsked = true;
   } else if (msg.kind === "periods") {
     dealt = msg;
-    if (!busy) deal();
+    if (!busy && !activePassPromise) deal();
   } else if (msg.kind === "loads") {
     inbox.set(`${msg.version}:${msg.cluster}:${msg.period}:${msg.round}`, msg.loads);
     wake?.();
@@ -1013,6 +1193,10 @@ const CITY_ORDER = new Map(CITIES.map((c, i) => [c.id, i]));
 
 /** The demand views' queries (T-078). They run between periods, never inside a solve. */
 function query(msg: Query) {
+  if (activePassPromise) {
+    midPassQueries.push(msg);
+    return;
+  }
   // (T-1533: and the bubbles' sums read from the live state: a weekend's, one purpose's)
   const byRound = BY_ROUND.has(msg.kind) || msg.kind === "purposeModes" || (msg.kind === "subSums" && ((msg as { day?: number }).day ?? 0) !== 0);
   if ((msg as { wait?: boolean }).wait && msg.kind !== "cells" && byRound && !aux) {
@@ -1959,8 +2143,8 @@ async function run() {
         for (const a of c.solveOrder) {
           if (import.meta.env.DEV && panicInSolve && a instanceof DemandApi) { panicInSolve = false; if (oomPanic) { oomNow(); return false; } a.debug_panic(); }
           if (!here(a) || (total === null && skip?.has(a))) continue;
-          if (total === null) a.solve(q);
-          else if (!a.crowd_with_external(q, ownOf(a, total))) throw new Error("shared crowding layout disagrees");
+          if (total === null) await solvePop(a, q);
+          else if (!(await crowdPop(a, q, ownOf(a, total)))) throw new Error("shared crowding layout disagrees");
           // a population's pass is up to a second of one call: let a waiting query or a newer
           // network in between
           await yieldNow();
@@ -2142,7 +2326,7 @@ async function run() {
           for (const c of cs) for (const a of c.solveOrder) {
             if (!own(a)) continue;
             a.set_part(share[0], share[1]);
-            a.solve(SPLIT_FROM);
+            await solvePop(a, SPLIT_FROM);
             await yieldNow();
             if (pending) return false;
           }
@@ -2257,8 +2441,8 @@ async function run() {
             const t = round > 0 ? total(round - 1) : null;
             if (t) for (const a of fresh) keepTrail(a, q, round - 1);
             for (const a of order) {
-              if (t === null) a.solve(q);
-              else if (!a.crowd_with_external(q, ownOfIn(c, a, t))) throw new Error("local crowding layout disagrees");
+              if (t === null) await solvePop(a, q);
+              else if (!(await crowdPop(a, q, ownOfIn(c, a, t)))) throw new Error("local crowding layout disagrees");
               await yieldNow();
               if (pending) return false;
             }
@@ -2557,6 +2741,9 @@ async function run() {
   }
   busy = false;
   setRough(false);
-  if (!dead) closeDeferred();
+  if (!dead) {
+    if (dealt) deal();
+    closeDeferred();
+  }
 }
 let freshCarry = false;

@@ -124,7 +124,9 @@ export type ToDemand =
       groups?: number[][];
       /** T-1607: the periods whose market this worker solves in a solve with the barrier (`share`
        * true in every solving worker when any market sits apart from its period's cities) */
-      markets?: number[]; share?: boolean }
+      markets?: number[]; share?: boolean;
+      /** Force WASM CPU mode choice instead of WebGPU (`?perfOff=webgpu`). */
+      noGpu?: boolean }
   /** open more city packs and/or zones' market packs (T-149, T-377); answered by `opened`. A
    * market pack is its text or, from the page, its UTF-8 bytes (T-180: decoded in the worker; the
    * aux worker, which never opens one, gets empty bytes). `bare` (T-325, aux worker only): a zone
