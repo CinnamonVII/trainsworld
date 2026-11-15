@@ -186,6 +186,67 @@ pub(crate) fn walk_kept(acc: &[(u32, f32, f32, u32)], eg: &[(u32, f32, f32, u32)
     if tot > 0.0 && tot - kept > WALK_SLIVER * tot { (kept / tot).min(1.0) } else { 1.0 }
 }
 
+/// The mode choice's constants for a batch of pairs: the driver's cost and the walker's, the
+/// rail constant, the fare ratio's fade, and the parking split (`Params::car_choice`,
+/// `Params::ratio_share`). Kept together so both logit evaluations (the fare asked and
+/// `FARE_D_MIN` dearer) inline and interleave in the pair loop.
+#[derive(Clone, Copy)]
+struct Logit {
+    bt: F8,
+    road: F8,
+    paid: F8,
+    free: F8,
+    uw: F8,
+    asc_rail: F8,
+    hi: F8,
+    kf: F8,
+    paying: bool,
+}
+
+impl Logit {
+    /// `Params::ratio_share`: rail's share of the drivers at this ratio.
+    #[inline(always)]
+    fn ratio(self, rail_c: F8, car: F8) -> F8 {
+        let (zero, one) = (F8::splat(0.0), F8::splat(1.0));
+        let qr = rail_c / car;
+        let s = one / (one + qr * qr * qr);
+        let fr = ((self.hi - qr) * self.kf).max(zero).min(one);
+        let fc = ((self.hi - one / qr) * self.kf).max(zero).min(one);
+        one - (one - s * fr) * fc
+    }
+    /// `Params::car_choice`: rail's share of the trips against the car and walking.
+    #[inline(always)]
+    fn share(self, rail: F8) -> F8 {
+        let one = F8::splat(1.0);
+        let util = self.bt * (self.road - rail) + self.asc_rail;
+        let rail_c = rail.max(F8::splat(0.01));
+        let e = (self.uw - util).exp();
+        let w0 = e / (one + util.neg().exp() + e);
+        let s0 = (one - w0) * self.ratio(rail_c, self.road);
+        if !self.paying {
+            s0
+        } else {
+            let w1 = e / (one + (util + self.bt * self.paid).neg().exp() + e);
+            let s1 = (one - w1) * self.ratio(rail_c, self.road + self.paid);
+            s0 + (one - self.free) * (s1 - s0)
+        }
+    }
+    /// T-2214: between two land parts rail is the only way, held by the ratio curve's fade
+    /// alone (`Params::bound_share`).
+    #[inline(always)]
+    fn bound(self, rail: F8) -> F8 {
+        let (zero, one) = (F8::splat(0.0), F8::splat(1.0));
+        let rail_c = rail.max(F8::splat(0.01));
+        let f0 = ((self.hi - rail_c / self.road) * self.kf).max(zero).min(one);
+        if !self.paying {
+            f0
+        } else {
+            let f1 = ((self.hi - rail_c / (self.road + self.paid)) * self.kf).max(zero).min(one);
+            f0 + (one - self.free) * (f1 - f0)
+        }
+    }
+}
+
 pub fn mode_choice(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk_tab: &[u16], walk_max: &[u16], s: usize, p: &Params, nr: &NoRail) -> ModeOut {
     mode_choice_part(z, gr, sz, er, walk_tab, walk_max, s, p, nr, (0, 1))
 }
@@ -338,7 +399,11 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
     // and its egress stations, their weights and `Subzones::acc_st` entries, padded to K with
     // station `s` (read as a dummy past the row's end, 0) at weight 0: a pad adds exactly 0 to
     // every sum it enters, so eight destinations go through the same steps
-    let (mut eg_st, mut eg_e, mut eg_k, mut eg_n): (Vec<[u32; KE]>, Vec<[f32; KE]>, Vec<[u32; KE]>, Vec<u8>) = (vec![], vec![], vec![], vec![]);
+    let (mut eg_st, mut eg_k, mut eg_n): (Vec<[u32; KE]>, Vec<[u32; KE]>, Vec<u8>) = (vec![], vec![], vec![]);
+    // the egress weights by band first, then destination (`eg_e[b * nq + q]`): a batch's
+    // destinations are neighbouring subzones, so their rows sit in the same cache lines
+    let nq = sz.zd.len();
+    let mut eg_e: Vec<[f32; KE]> = vec![[0f32; KE]; nb * nq];
     // and the longest of its egress walks (T-1059)
     let mut eg_far: Vec<f32> = vec![];
     for &j in &dzones {
@@ -346,17 +411,17 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
         let mut dvz = 0.0f32;
         for &v in &sz.zd[sz.zd_off[j] as usize..sz.zd_off[j + 1] as usize] {
             let v = v as usize;
+            let q = eg_st.len();
             let (mut st, mut kk) = ([s as u32; KE], [0u32; KE]);
             for (n, k) in sz.walk(v).enumerate() {
                 (st[n], kk[n]) = (sz.acc_st[k], k as u32);
             }
-            // its weights per band: destination q's band b at `eg_e[q * nb + b]`
+            // its weights per band: destination q's band b at `eg_e[b * nq + q]`
             for b in 0..nb {
-                let mut e = [0f32; KE];
+                let e = &mut eg_e[b * nq + q];
                 for (n, k) in sz.walk(v).enumerate() {
                     e[n] = acc_e[b * na + k];
                 }
-                eg_e.push(e);
             }
             eg_st.push(st);
             eg_k.push(kk);
@@ -412,6 +477,8 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
     // visit (`visit`: [trips at the origin x decay, walking's cost, road factor, origin walk]),
     // its top bit set for the walk-and-ride row
     let mut cand: Vec<[u32; 2]> = Vec::with_capacity(dd.len() + 7);
+    // the walk entries' weight at the rides' offset, per band, refilled for each origin
+    let mut c_u = vec![0f32; nb];
     let mut visit: Vec<[f32; 4]> = Vec::with_capacity(dz.len());
     let mut visit_w: Vec<f32> = Vec::with_capacity(dz.len());
     let mut visit_b: Vec<u8> = Vec::with_capacity(dz.len());
@@ -503,7 +570,9 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
             let (m_u, m_r) = (acc_m[u], ride_m[u]);
             let rides = !ride.is_empty();
             // the walk entries' weight at the rides' offset, per band
-            let c_u: Vec<f32> = bands.iter().map(|&(th, _)| if walk.is_empty() { 0.0 } else { fast_exp(-th * (m_u - m_r)) }).collect();
+            for (b, &(th, _)) in bands.iter().enumerate() {
+                c_u[b] = if walk.is_empty() { 0.0 } else { fast_exp(-th * (m_u - m_r)) };
+            }
             // T-1059: the most this origin's trips walk before their last station (the walk to a
             // station and the most its strategies walk between stations): a destination whose
             // egress walks keep within its distance on top of that keeps every station pair, the
@@ -565,7 +634,9 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                     continue;
                 }
                 let at = 2 * b * h;
-                ab_y[at..at + 2 * h].fill(0.0);
+                // only the real stations: the pads write into the dummies, which nothing reads
+                ab_y[at..at + s].fill(0.0);
+                ab_y[at + h..at + h + s].fill(0.0);
                 let er_b = &er[b * ss..(b + 1) * ss];
                 let (a_row, b_row) = ab_row[at..at + 2 * h].split_at_mut(h);
                 let (a_row, b_row) = (&mut a_row[..s], &mut b_row[..s]);
@@ -604,24 +675,24 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                 let bl: [usize; 8] = std::array::from_fn(|l| visit_b[(c[l][1] & 0x7fff_ffff) as usize] as usize);
                 let rr: [u32; 8] = std::array::from_fn(|l| if c[l][1] >> 31 != 0 { h as u32 } else { 0 });
                 let ro: [u32; 8] = std::array::from_fn(|l| (2 * bl[l] * h) as u32 + rr[l]);
-                let th8 = F8::new(std::array::from_fn(|l| bands[bl[l]].0));
-                let off8 = F8::new(std::array::from_fn(|l| bands[bl[l]].1));
-                let kn = q.iter().map(|&q| eg_n[q]).max().unwrap() as usize;
+                let th8 = F8::from_fn(|l| bands[bl[l]].0);
+                let off8 = F8::from_fn(|l| bands[bl[l]].1);
+                let mut kn = 0usize;
+                for &ql in &q {
+                    kn = kn.max(eg_n[ql] as usize);
+                }
                 let mut ix = [[0u32; 8]; KE];
                 let mut ev = [F8::splat(0.0); KE];
                 let mut rv = [F8::splat(0.0); KE];
                 let mut ssum = F8::splat(0.0);
                 for k in 0..kn {
-                    // a pad goes to its own dummy (lane and step), so pads chain nothing
-                    ix[k] = std::array::from_fn(|l| {
-                        let t = eg_st[q[l]][k] as usize;
-                        (if t == s { s + l * KE + k } else { t }) as u32 + ro[l]
-                    });
-                    ev[k] = F8::new(std::array::from_fn(|l| eg_e[q[l] * nb + bl[l]][k]));
+                    // a pad goes to the row's dummies (0), so it chains nothing
+                    ix[k] = std::array::from_fn(|l| eg_st[q[l]][k] + ro[l]);
+                    ev[k] = F8::from_fn(|l| eg_e[bl[l] * nq + q[l]][k]);
                     rv[k] = F8::gather(&ab_row, &ix[k]);
                     ssum = ssum + rv[k] * ev[k];
                 }
-                let [x8, y8, l08, l18] = F8::transpose(std::array::from_fn(|l| dd[q[l]][0]));
+                let [x8, y8, l08, l18] = F8::transpose_rows(std::array::from_fn(|l| F4::load(&dd[q[l]][0])));
                 let (dx, dy) = (ux8 - x8, uy8 - y8);
                 let d = (dx * dx + dy * dy).sqrt();
                 // T-1059: a lane some of whose station pairs take longer than walking there keeps
@@ -634,7 +705,7 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                 let mut bad_at = [(0u32, 0u32); 8];
                 // (no walk to compare with between two land parts, T-2214)
                 let near = if rule {
-                    d.lt_mask((F8::splat(mw) + F8::new(std::array::from_fn(|l| eg_far[q[l]]))).min(F8::splat(WALK_REACH_KM * 1000.0 + 1.0))) & ((1u32 << (n_cand - 8 * ci).min(8)) - 1) & !cross
+                    d.lt_mask((F8::splat(mw) + F8::from_fn(|l| eg_far[q[l]])).min(F8::splat(WALK_REACH_KM * 1000.0 + 1.0))) & ((1u32 << (n_cand - 8 * ci).min(8)) - 1) & !cross
                 } else {
                     0
                 };
@@ -733,7 +804,7 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                             while km != 0 {
                                 let kk = km.trailing_zeros() as usize;
                                 km &= km - 1;
-                                let cw = w * er_at(eg_st[qd][kk] as usize, j) * eg_e[qd * nb + b][kk];
+                                let cw = w * er_at(eg_st[qd][kk] as usize, j) * eg_e[b * nq + qd][kk];
                                 if cw > 0.0 {
                                     bad += cw;
                                 }
@@ -759,7 +830,7 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                                 let kk = km.trailing_zeros() as usize;
                                 km &= km - 1;
                                 let t = eg_st[qd][kk];
-                                let cw = w * er_at(t as usize, j) * eg_e[qd * nb + b][kk];
+                                let cw = w * er_at(t as usize, j) * eg_e[b * nq + qd][kk];
                                 if cw > 0.0 {
                                     kept += cw;
                                     lane_bad.push((a, t, cw, k as u32, kk as u8));
@@ -784,13 +855,13 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                 if ok == 0 {
                     continue;
                 }
-                let [park8, dv8, m8, paid8] = F8::transpose(std::array::from_fn(|l| dd[q[l]][1]));
-                let [tu8, cw8, mut df8, mo8] = F8::transpose(std::array::from_fn(|l| visit[(c[l][1] & 0x7fff_ffff) as usize]));
+                let [park8, dv8, m8, paid8] = F8::transpose_rows(std::array::from_fn(|l| F4::load(&dd[q[l]][1])));
+                let [tu8, cw8, mut df8, mo8] = F8::transpose_rows(std::array::from_fn(|l| F4::load(&visit[(c[l][1] & 0x7fff_ffff) as usize])));
                 // T-2214: between two land parts, rail against a car on the bridge that is not
                 // there (straight x `road_detour`)
                 let pick = |m: u32, a: F8, b: F8| {
                     let (a, b) = (a.to_array(), b.to_array());
-                    F8::new(std::array::from_fn(|l| if m >> l & 1 != 0 { b[l] } else { a[l] }))
+                    F8::from_fn(|l| if m >> l & 1 != 0 { b[l] } else { a[l] })
                 };
                 if cross != 0 {
                     df8 = pick(cross, df8, F8::splat(p.road_detour));
@@ -812,46 +883,14 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                 // space (`Params::car_choice`; where no lane pays, the second share equals the
                 // first): walking's share of the three-way logit, then rail of the rest by
                 // `Params::ratio_share` (T-918)
-                let (zero, one) = (F8::splat(0.0), F8::splat(1.0));
+                let zero = F8::splat(0.0);
                 let (hi, kf) = (F8::splat(p.ratio_fade_hi), F8::splat(1.0 / (p.ratio_fade_hi - p.ratio_fade_lo)));
                 let paying = paid8.lt_mask(F8::splat(1e-30)) != 0xff;
-                let free8 = if paying { F8::transpose(std::array::from_fn(|l| dd[q[l]][2]))[0] } else { zero };
-                let share = |rail: F8| {
-                    let util = bt * (road - rail) + F8::splat(p.asc_rail);
-                    let rail_c = rail.max(F8::splat(0.01));
-                    let ratio = |car: F8| {
-                        let qr = rail_c / car;
-                        let s = one / (one + qr * qr * qr);
-                        let fr = ((hi - qr) * kf).max(zero).min(one);
-                        let fc = ((hi - one / qr) * kf).max(zero).min(one);
-                        one - (one - s * fr) * fc
-                    };
-                    let e = (uw - util).exp();
-                    let w0 = e / (one + util.neg().exp() + e);
-                    let s0 = (one - w0) * ratio(road);
-                    if !paying {
-                        s0
-                    } else {
-                        let w1 = e / (one + (util + bt * paid8).neg().exp() + e);
-                        let s1 = (one - w1) * ratio(road + paid8);
-                        s0 + (one - free8) * (s1 - s0)
-                    }
-                };
-                // T-2214: between two land parts rail is the only way, held by the ratio curve's
-                // fade alone (`Params::bound_share`)
-                let bound = |rail: F8| {
-                    let rail_c = rail.max(F8::splat(0.01));
-                    let f0 = ((hi - rail_c / road) * kf).max(zero).min(one);
-                    if !paying {
-                        f0
-                    } else {
-                        let f1 = ((hi - rail_c / (road + paid8)) * kf).max(zero).min(one);
-                        f0 + (one - free8) * (f1 - f0)
-                    }
-                };
+                let free8 = if paying { F8::transpose_rows(std::array::from_fn(|l| F4::load(&dd[q[l]][2])))[0] } else { zero };
+                let logit = Logit { bt, road, paid: paid8, free: free8, uw, asc_rail: F8::splat(p.asc_rail), hi, kf, paying };
                 let chosen = |rail: F8| {
-                    let s = share(rail);
-                    if cross != 0 { pick(cross, s, bound(rail)) } else { s }
+                    let s = logit.share(rail);
+                    if cross != 0 { pick(cross, s, logit.bound(rail)) } else { s }
                 };
                 let x = tu8 * dv8 * chosen(rail);
                 // T-1300: and at a fare `FARE_D_MIN` dearer, for the riders' fare sensitivity
@@ -874,7 +913,7 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                 let ssum_a = ssum.to_array();
                 // and the walkers it takes: its trips times the zone pair's walking with no rail
                 // (`rail_walk`), as the zones' sums have it
-                let mut wl = (x * F8::new(std::array::from_fn(|l| visit_w[(c[l][1] & 0x7fff_ffff) as usize]))).to_array();
+                let mut wl = (x * F8::from_fn(|l| visit_w[(c[l][1] & 0x7fff_ffff) as usize])).to_array();
                 for l in 0..8 {
                     if ok >> l & 1 == 0 {
                         continue;
