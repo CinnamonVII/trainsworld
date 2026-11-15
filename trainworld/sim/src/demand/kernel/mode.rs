@@ -186,6 +186,34 @@ pub(crate) fn walk_kept(acc: &[(u32, f32, f32, u32)], eg: &[(u32, f32, f32, u32)
     if tot > 0.0 && tot - kept > WALK_SLIVER * tot { (kept / tot).min(1.0) } else { 1.0 }
 }
 
+/// Add a single band-row's weighted contribution into `row` (`out.od`) and return the fixed-order
+/// 4-lane sum (`tot`) for `acc_home`/`rail_band`. Each element of `row` receives the exact same
+/// `f32` operation as the scalar loop; only `tot` associates in 4 lanes before a fixed reduction.
+#[inline(always)]
+fn add_split_with(
+    row: &mut [f32],
+    er_a: &[f32],
+    w: f32,
+    y4: impl Fn(usize) -> F4,
+    y1: impl Fn(usize) -> f32,
+) -> f32 {
+    let s = row.len();
+    let s4 = s & !3;
+    let w4 = F4::splat(w);
+    let mut t4 = F4::splat(0.0);
+    for c in (0..s4).step_by(4) {
+        let f = y4(c) * w4 * F4::load(&er_a[c..]);
+        (F4::load(&row[c..]) + f).store(&mut row[c..]);
+        t4 = t4 + f;
+    }
+    let mut tot = t4.sum_fixed();
+    for t in s4..s {
+        let f = y1(t) * w * er_a[t];
+        row[t] += f;
+        tot += f;
+    }
+    tot
+}
 pub fn mode_choice(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk_tab: &[u16], walk_max: &[u16], s: usize, p: &Params, nr: &NoRail) -> ModeOut {
     mode_choice_part(z, gr, sz, er, walk_tab, walk_max, s, p, nr, (0, 1))
 }
@@ -958,29 +986,23 @@ pub fn mode_choice_part(z: &Zones, gr: &Gravity, sz: &Subzones, er: &[f32], walk
                 for k in walk.start..ride.end {
                     let (a, w) = (sz.acc_st[k] as usize, acc_e[b * na + k]);
                     let row = &mut out.od[a * s..(a + 1) * s];
-                    let mut tot = 0.0f32;
                     let er_a = &er[b * ss + a * s..b * ss + (a + 1) * s];
-                    if k < walk.end {
+                    let tot = if k < walk.end {
                         if rides {
-                            for (((o, &y), &yb), &e) in row.iter_mut().zip(y_row).zip(yb_row).zip(er_a) {
-                                let f = (y + c_ub * yb) * w * e;
-                                *o += f;
-                                tot += f;
-                            }
+                            let c_ub4 = F4::splat(c_ub);
+                            add_split_with(
+                                row,
+                                er_a,
+                                w,
+                                |c| F4::load(&y_row[c..]) + c_ub4 * F4::load(&yb_row[c..]),
+                                |t| y_row[t] + c_ub * yb_row[t],
+                            )
                         } else {
-                            for ((o, &y), &e) in row.iter_mut().zip(y_row).zip(er_a) {
-                                let f = y * w * e;
-                                *o += f;
-                                tot += f;
-                            }
+                            add_split_with(row, er_a, w, |c| F4::load(&y_row[c..]), |t| y_row[t])
                         }
                     } else {
-                        for ((o, &yb), &e) in row.iter_mut().zip(yb_row).zip(er_a) {
-                            let f = yb * w * e;
-                            *o += f;
-                            tot += f;
-                        }
-                    }
+                        add_split_with(row, er_a, w, |c| F4::load(&yb_row[c..]), |t| yb_row[t])
+                    };
                     out.acc_home[k] += tot;
                     out.rail_band[dist_band(sz.acc_d[k])] += tot as f64;
                 }
