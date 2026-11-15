@@ -1025,6 +1025,9 @@ pub fn gravity(z: &Zones, p: &Params, max_iters: usize, tol: f64) -> Gravity {
     let creg: Vec<u8> = cols.iter().map(|&j| z.region[j]).collect();
     // the factor by "regions differ" (index 0 same, 1 different)
     let kf = [1.0f64, p.border_factor as f64];
+    // one region: every pair's factor is kf[0] = 1, so the inner loops skip it (multiplying by
+    // exactly 1.0 changes no bit)
+    let one_region = z.region.iter().all(|&r| r == *z.region.first().unwrap_or(&0));
     let mut g = Gravity { row: vec![0.0; z.n], col: z.jobs.clone(), border: p.border_factor, ftab, zk: z.zone_m / 1000.0, walk_set: false, wroutes: None, wcost: WalkCost::default(), wf_off: vec![], wf_j: vec![], wf_c: vec![], wf_s: vec![], th, offx, offy, kb, iters: 0, max_err: 0.0, mean_km: 0.0, total: 0.0, pull: None };
     let mut colc: Vec<f64> = cols.iter().map(|&j| g.col[j]).collect();
     let mut acc = vec![0f64; cols.len()];
@@ -1035,8 +1038,14 @@ pub fn gravity(z: &Zones, p: &Params, max_iters: usize, tol: f64) -> Gravity {
             let base = g.base(z, i);
             let ri = z.region[i];
             let mut s = 0.0f64;
-            for (k, &key) in ckey.iter().enumerate() {
-                s += colc[k] * g.ftab[(base + key) as usize] as f64 * kf[(creg[k] != ri) as usize];
+            if one_region {
+                for (k, &key) in ckey.iter().enumerate() {
+                    s += colc[k] * g.ftab[(base + key) as usize] as f64;
+                }
+            } else {
+                for (k, &key) in ckey.iter().enumerate() {
+                    s += colc[k] * g.ftab[(base + key) as usize] as f64 * kf[(creg[k] != ri) as usize];
+                }
             }
             if it > 0 {
                 err = err.max((g.row[i] * s / o[i] - 1.0).abs());
@@ -1054,8 +1063,14 @@ pub fn gravity(z: &Zones, p: &Params, max_iters: usize, tol: f64) -> Gravity {
             let base = g.base(z, i);
             let ri = z.region[i];
             let r = g.row[i];
-            for (k, &key) in ckey.iter().enumerate() {
-                acc[k] += r * g.ftab[(base + key) as usize] as f64 * kf[(creg[k] != ri) as usize];
+            if one_region {
+                for (k, &key) in ckey.iter().enumerate() {
+                    acc[k] += r * g.ftab[(base + key) as usize] as f64;
+                }
+            } else {
+                for (k, &key) in ckey.iter().enumerate() {
+                    acc[k] += r * g.ftab[(base + key) as usize] as f64 * kf[(creg[k] != ri) as usize];
+                }
             }
         }
         // T-1000: a column's pull 1 / acc is held within PULL_CAP of the job-weighted geometric
@@ -1094,11 +1109,20 @@ pub fn gravity(z: &Zones, p: &Params, max_iters: usize, tol: f64) -> Gravity {
     for &i in &rows {
         let base = g.base(z, i);
         let ri = z.region[i];
-        for (k, &key) in ckey.iter().enumerate() {
-            let idx = (base + key) as usize;
-            let t = g.row[i] * colc[k] * g.ftab[idx] as f64 * kf[(creg[k] != ri) as usize];
-            sum += t;
-            sumd += t * dtab[idx] as f64;
+        if one_region {
+            for (k, &key) in ckey.iter().enumerate() {
+                let idx = (base + key) as usize;
+                let t = g.row[i] * colc[k] * g.ftab[idx] as f64;
+                sum += t;
+                sumd += t * dtab[idx] as f64;
+            }
+        } else {
+            for (k, &key) in ckey.iter().enumerate() {
+                let idx = (base + key) as usize;
+                let t = g.row[i] * colc[k] * g.ftab[idx] as f64 * kf[(creg[k] != ri) as usize];
+                sum += t;
+                sumd += t * dtab[idx] as f64;
+            }
         }
     }
     g.total = sum;

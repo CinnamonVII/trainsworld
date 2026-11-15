@@ -42,7 +42,7 @@ impl F4 {
     /// `row[ix[l]]` per lane.
     #[inline(always)]
     pub fn gather(row: &[f32], ix: &[u32; 4]) -> F4 {
-        F4::new([row[ix[0] as usize], row[ix[1] as usize], row[ix[2] as usize], row[ix[3] as usize]])
+        F4::of4(row[ix[0] as usize], row[ix[1] as usize], row[ix[2] as usize], row[ix[3] as usize])
     }
     /// Four rows of four lanes as four columns.
     #[inline(always)]
@@ -101,6 +101,17 @@ impl F8 {
     pub fn new(a: [f32; 8]) -> F8 {
         F8(F4::new([a[0], a[1], a[2], a[3]]), F4::new([a[4], a[5], a[6], a[7]]))
     }
+    /// Eight consecutive floats.
+    #[inline(always)]
+    pub fn load(a: &[f32]) -> F8 {
+        debug_assert!(a.len() >= 8);
+        F8(F4::load(a), F4::load(&a[4..]))
+    }
+    /// Eight lane values, built in registers (no temporary array).
+    #[inline(always)]
+    pub fn from_fn(f: impl Fn(usize) -> f32) -> F8 {
+        F8(F4::of4(f(0), f(1), f(2), f(3)), F4::of4(f(4), f(5), f(6), f(7)))
+    }
     #[inline(always)]
     pub fn splat(x: f32) -> F8 {
         F8(F4::splat(x), F4::splat(x))
@@ -117,9 +128,25 @@ impl F8 {
     /// Eight rows of four as four columns of eight.
     #[inline(always)]
     pub fn transpose(r: [[f32; 4]; 8]) -> [F8; 4] {
-        let a = F4::transpose([F4::new(r[0]), F4::new(r[1]), F4::new(r[2]), F4::new(r[3])]);
-        let b = F4::transpose([F4::new(r[4]), F4::new(r[5]), F4::new(r[6]), F4::new(r[7])]);
+        F8::transpose_rows(std::array::from_fn(|l| F4::load(&r[l])))
+    }
+    /// The same for rows already in registers (`dd`'s and `visit`'s records).
+    #[inline(always)]
+    pub fn transpose_rows(r: [F4; 8]) -> [F8; 4] {
+        let a = F4::transpose([r[0], r[1], r[2], r[3]]);
+        let b = F4::transpose([r[4], r[5], r[6], r[7]]);
         [F8(a[0], b[0]), F8(a[1], b[1]), F8(a[2], b[2]), F8(a[3], b[3])]
+    }
+    /// Eight rows of eight as eight columns of eight.
+    #[inline(always)]
+    pub fn transpose8(r: [F8; 8]) -> [F8; 8] {
+        let a = imp::transpose([r[0].0, r[1].0, r[2].0, r[3].0]);
+        let b = imp::transpose([r[4].0, r[5].0, r[6].0, r[7].0]);
+        let lo = [F8(a[0], b[0]), F8(a[1], b[1]), F8(a[2], b[2]), F8(a[3], b[3])];
+        let a = imp::transpose([r[0].1, r[1].1, r[2].1, r[3].1]);
+        let b = imp::transpose([r[4].1, r[5].1, r[6].1, r[7].1]);
+        let hi = [F8(a[0], b[0]), F8(a[1], b[1]), F8(a[2], b[2]), F8(a[3], b[3])];
+        [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]]
     }
     /// Four columns of eight as eight rows of four: lane l of each, in order.
     #[inline(always)]
@@ -179,6 +206,17 @@ mod imp {
         #[inline(always)]
         pub fn new(a: [f32; 4]) -> F4 {
             F4(f32x4(a[0], a[1], a[2], a[3]))
+        }
+        /// Four consecutive floats.
+        #[inline(always)]
+        pub fn load(a: &[f32]) -> F4 {
+            debug_assert!(a.len() >= 4);
+            unsafe { F4(v128_load(a.as_ptr() as *const v128)) }
+        }
+        /// Four lane values, built without a temporary array.
+        #[inline(always)]
+        pub fn of4(a: f32, b: f32, c: f32, d: f32) -> F4 {
+            F4(f32x4(a, b, c, d))
         }
         #[inline(always)]
         pub fn splat(x: f32) -> F4 {
@@ -267,6 +305,18 @@ mod imp {
         pub fn new(a: [f32; 4]) -> F4 {
             unsafe { F4(_mm_loadu_ps(a.as_ptr())) }
         }
+        /// Four consecutive floats.
+        #[inline(always)]
+        pub fn load(a: &[f32]) -> F4 {
+            debug_assert!(a.len() >= 4);
+            unsafe { F4(_mm_loadu_ps(a.as_ptr())) }
+        }
+        /// Four lane values, built without a temporary array (`_mm_set_ps` takes them in
+        /// reverse).
+        #[inline(always)]
+        pub fn of4(a: f32, b: f32, c: f32, d: f32) -> F4 {
+            unsafe { F4(_mm_set_ps(d, c, b, a)) }
+        }
         #[inline(always)]
         pub fn splat(x: f32) -> F4 {
             unsafe { F4(_mm_set1_ps(x)) }
@@ -354,6 +404,17 @@ mod imp {
         #[inline(always)]
         pub fn new(a: [f32; 4]) -> F4 {
             F4(a)
+        }
+        /// Four consecutive floats.
+        #[inline(always)]
+        pub fn load(a: &[f32]) -> F4 {
+            debug_assert!(a.len() >= 4);
+            F4([a[0], a[1], a[2], a[3]])
+        }
+        /// Four lane values, built without a temporary array.
+        #[inline(always)]
+        pub fn of4(a: f32, b: f32, c: f32, d: f32) -> F4 {
+            F4([a, b, c, d])
         }
         #[inline(always)]
         pub fn splat(x: f32) -> F4 {
@@ -444,6 +505,11 @@ mod tests {
         }
         for (l, r) in F8::by_lane(cols).iter().enumerate() {
             assert_eq!(r.to_array(), rows[l]);
+        }
+        let rows8: [[f32; 8]; 8] = std::array::from_fn(|l| std::array::from_fn(|c| (10 * l + c) as f32));
+        let cols8 = F8::transpose8(std::array::from_fn(|l| F8::new(rows8[l])));
+        for (c, col) in cols8.iter().enumerate() {
+            assert_eq!(col.to_array(), std::array::from_fn(|l| rows8[l][c]));
         }
         for v in [[0.0f32, -0.0, 1.0, -1.0], [79.9, 80.0, 80.1, -80.1]] {
             let e = F4::new(v).exp().to_array();
