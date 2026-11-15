@@ -946,8 +946,8 @@ junction inspector.
 A junction where lines merge can take a **merge lane** (T-3376, `Network::node_merge_lane`): a
 short second track through the join, 0.3 km of track at the junction's level (twice over water),
 that lets trains from both lines wait side by side and join the shared track closer together. Each
-train then takes 0.8 of what it would (`MERGE_LANE_OCC`), so the merge's utilisation and its
-waiting fall by a fifth: about a quarter more trains pass. The junction inspector offers it where
+train then takes 0.6 of what it would (`MERGE_LANE_OCC`), so the merge's utilisation falls by
+two-fifths and about two-thirds more trains pass. The junction inspector offers it where
 lines merge now and shows the merge's utilisation with and without it; on a constructed junction it
 is paid at once, on a blueprint one it joins the blueprint.
 The junction inspector (T-031, [ui-building.md](ui-building.md)) lists the junction's moves (from

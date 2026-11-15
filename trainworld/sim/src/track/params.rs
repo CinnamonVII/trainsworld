@@ -407,9 +407,9 @@ pub const PASSING_S: f64 = 40.0;
 pub const TERMINUS_MARGIN_S: f64 = 60.0;
 pub const CONFLICT_S: f64 = 120.0;
 /// T-3376: a merge lane's occupancy per train as a share of a plain merge's: a short second track
-/// through a merge lets trains join the shared track closer together, so it takes about a quarter
+/// through a merge lets trains join the shared track closer together, so it takes about two-thirds
 /// more trains.
-pub const MERGE_LANE_OCC: f64 = 0.8;
+pub const MERGE_LANE_OCC: f64 = 0.6;
 /// A reversal's cost to the route search (s) and its least cost to the stop insertion (m; more on
 /// a longer route, `order_cost`), so a route without one wins unless it is much longer (T-797).
 pub const REVERSAL_SEARCH_S: f64 = 600.0;
