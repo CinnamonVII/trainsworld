@@ -1,8 +1,10 @@
 import { perfOff } from "../../perfFlags";
+import { requestWebGpuAdapter, requestWebGpuDevice } from "./adapter";
 
 export type WebGpuStatus =
   | "ready"
   | "fallback-adapter"
+  | "browser-blocked"
   | "disabled"
   | "unsupported"
   | "no-adapter"
@@ -13,6 +15,7 @@ export interface WebGpuCapability {
   canRun: boolean;
   status: WebGpuStatus;
   adapterName: string | null;
+  hardwareGpu: string | null;
   reason: string | null;
   maxStorageMiB: number;
 }
@@ -22,7 +25,10 @@ const MIN_STORAGE_BUFFERS_PER_STAGE = 8;
 const MIN_WORKGROUP_INVOCATIONS = 256;
 const MIN_WORKGROUP_STORAGE_BYTES = 16 * 1024;
 
-let cachedProbe: Promise<WebGpuCapability> | null = null;
+const SOFTWARE_GPU_RE = /swiftshader|llvmpipe|softpipe|software|microsoft basic render/i;
+
+let cachedReadyProbe: WebGpuCapability | null = null;
+let inflightProbe: Promise<WebGpuCapability> | null = null;
 
 function formatAdapterName(info?: GPUAdapterInfo): string | null {
   if (!info) return null;
@@ -33,13 +39,51 @@ function formatAdapterName(info?: GPUAdapterInfo): string | null {
 }
 
 /**
+ * Inspect WebGL2/WebGL for a non-software GPU renderer so we can tell when WebGPU is merely
+ * disabled in the browser (e.g. Vulkan off on Linux Chromium/Brave or non-HTTPS origin) vs absent.
+ */
+function detectHardwareWebGlGpu(): string | null {
+  if (typeof document === "undefined") return null;
+  let canvas: HTMLCanvasElement | null = null;
+  try {
+    canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const gl = (canvas.getContext("webgl2") ?? canvas.getContext("webgl")) as
+      | WebGL2RenderingContext
+      | WebGLRenderingContext
+      | null;
+    if (!gl) return null;
+    try {
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      const raw = String(
+        (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) ?? "",
+      ).trim();
+      if (!raw || SOFTWARE_GPU_RE.test(raw)) return null;
+      return raw.replace(/^ANGLE\s*\((.+)\)$/i, "$1").trim();
+    } finally {
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+    }
+  } catch {
+    return null;
+  } finally {
+    canvas = null;
+  }
+}
+
+/**
  * Probe whether this browser and GPU can run the WebGPU compute pass (`DemandGpuContext`).
  * Compiles a minimal compute module on a short-lived device and destroys it immediately so no VRAM stays held.
  */
 export function probeWebGpuSupport(opts?: { fresh?: boolean }): Promise<WebGpuCapability> {
-  if (!opts?.fresh && cachedProbe) return cachedProbe;
-  const run = runProbe();
-  if (!opts?.fresh) cachedProbe = run;
+  if (!opts?.fresh && cachedReadyProbe) return Promise.resolve(cachedReadyProbe);
+  if (!opts?.fresh && inflightProbe) return inflightProbe;
+  const run = runProbe().then((res) => {
+    if (res.canRun) cachedReadyProbe = res;
+    if (inflightProbe === run) inflightProbe = null;
+    return res;
+  });
+  inflightProbe = run;
   return run;
 }
 
@@ -49,41 +93,34 @@ async function runProbe(): Promise<WebGpuCapability> {
       canRun: false,
       status: "disabled",
       adapterName: null,
+      hardwareGpu: null,
       reason: "Disabled by ?perfOff=webgpu",
       maxStorageMiB: 0,
     };
   }
   if (typeof navigator === "undefined" || !("gpu" in navigator) || !navigator.gpu) {
+    const hardwareGpu = detectHardwareWebGlGpu();
+    const insecure = typeof window !== "undefined" && !window.isSecureContext;
+    const reason = insecure ? "WebGPU requires HTTPS or localhost" : "WebGPU API unavailable";
     return {
       canRun: false,
-      status: "unsupported",
+      status: hardwareGpu ? "browser-blocked" : "unsupported",
       adapterName: null,
-      reason: "WebGPU API unavailable",
+      hardwareGpu,
+      reason,
       maxStorageMiB: 0,
     };
   }
 
-  let adapter: GPUAdapter | null = null;
-  try {
-    adapter =
-      (await navigator.gpu.requestAdapter({ powerPreference: "high-performance" })) ??
-      (await navigator.gpu.requestAdapter());
-  } catch (err) {
-    return {
-      canRun: false,
-      status: "no-adapter",
-      adapterName: null,
-      reason: String(err),
-      maxStorageMiB: 0,
-    };
-  }
-
+  const { adapter, error: adapterError } = await requestWebGpuAdapter();
   if (!adapter) {
+    const hardwareGpu = detectHardwareWebGlGpu();
     return {
       canRun: false,
-      status: "no-adapter",
+      status: hardwareGpu ? "browser-blocked" : "no-adapter",
       adapterName: null,
-      reason: "No compatible WebGPU adapter",
+      hardwareGpu,
+      reason: adapterError ?? "No compatible WebGPU adapter",
       maxStorageMiB: 0,
     };
   }
@@ -102,6 +139,7 @@ async function runProbe(): Promise<WebGpuCapability> {
       canRun: false,
       status: "limits",
       adapterName,
+      hardwareGpu: null,
       reason: "Adapter compute limits too low",
       maxStorageMiB,
     };
@@ -109,37 +147,28 @@ async function runProbe(): Promise<WebGpuCapability> {
 
   let device: GPUDevice | null = null;
   try {
-    const requiredLimits: Record<string, number> = {};
-    if (adapter.limits.maxStorageBufferBindingSize >= 128 * 1024 * 1024) {
-      requiredLimits.maxStorageBufferBindingSize = Math.min(
-        adapter.limits.maxStorageBufferBindingSize,
-        256 * 1024 * 1024,
-      );
-    }
-    if (adapter.limits.maxBufferSize >= 256 * 1024 * 1024) {
-      requiredLimits.maxBufferSize = Math.min(
-        adapter.limits.maxBufferSize,
-        512 * 1024 * 1024,
-      );
-    }
-    device = await adapter.requestDevice({ requiredLimits });
+    device = await requestWebGpuDevice(adapter, { maxStorageBindingMiB: 256, maxBufferMiB: 512 });
     const mod = device.createShaderModule({
       code: `@compute @workgroup_size(1) fn main() {}`,
     });
-    const info = await mod.getCompilationInfo();
-    if (info.messages.some((m) => m.type === "error")) {
-      return {
-        canRun: false,
-        status: "device-failed",
-        adapterName,
-        reason: "Compute shader compile failed",
-        maxStorageMiB,
-      };
+    if (typeof mod.getCompilationInfo === "function") {
+      const info = await mod.getCompilationInfo();
+      if (info.messages.some((m) => m.type === "error")) {
+        return {
+          canRun: false,
+          status: "device-failed",
+          adapterName,
+          hardwareGpu: null,
+          reason: "Compute shader compile failed",
+          maxStorageMiB,
+        };
+      }
     }
     return {
       canRun: true,
       status: isFallback ? "fallback-adapter" : "ready",
       adapterName,
+      hardwareGpu: null,
       reason: isFallback ? "Software WebGPU adapter" : null,
       maxStorageMiB,
     };
@@ -148,6 +177,7 @@ async function runProbe(): Promise<WebGpuCapability> {
       canRun: false,
       status: "device-failed",
       adapterName,
+      hardwareGpu: null,
       reason: String(err),
       maxStorageMiB,
     };

@@ -254,7 +254,9 @@ function GpuComputeRow() {
     : !cap
       ? t("settingsTab.gpuChecking")
       : !cap.canRun
-        ? t("settingsTab.gpuCannotRun")
+        ? cap.status === "browser-blocked"
+          ? t("settingsTab.gpuBrowserBlocked")
+          : t("settingsTab.gpuCannotRun")
         : cap.status === "fallback-adapter" && cap.adapterName
           ? t("settingsTab.gpuFallbackAdapter", { adapter: cap.adapterName })
           : cap.adapterName
@@ -266,9 +268,26 @@ function GpuComputeRow() {
       ? undefined
       : cap.canRun
         ? t("settingsTab.gpuCanRunTip", { mib: String(cap.maxStorageMiB) })
-        : t("settingsTab.gpuCannotRunTip", { reason: cap.reason ?? "" });
-  const cls = off || !cap ? "muted" : cap.canRun ? (cap.status === "fallback-adapter" ? "" : "gpu-good") : "memory-bad";
-  return <div class="slider" data-gpu-support={off ? "off" : cap ? (cap.canRun ? "yes" : "no") : "checking"} data-tip={tip}>
+        : cap.status === "browser-blocked"
+          ? t("settingsTab.gpuBrowserBlockedTip", { gpu: cap.hardwareGpu ?? "", reason: cap.reason ?? "" })
+          : t("settingsTab.gpuCannotRunTip", { reason: cap.reason ?? "" });
+  const cls = off || !cap
+    ? "muted"
+    : cap.canRun
+      ? (cap.status === "fallback-adapter" ? "" : "gpu-good")
+      : cap.status === "browser-blocked"
+        ? "muted"
+        : "memory-bad";
+  const supportAttr = off
+    ? "off"
+    : !cap
+      ? "checking"
+      : cap.canRun
+        ? "yes"
+        : cap.status === "browser-blocked"
+          ? "blocked"
+          : "no";
+  return <div class="slider" data-gpu-support={supportAttr} data-tip={tip}>
     <span>{t("settingsTab.gpuCompute")}</span>
     <span class={"num " + cls}>{text}</span>
   </div>;

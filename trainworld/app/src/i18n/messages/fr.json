@@ -1840,6 +1840,8 @@
   "settingsTab.webgpuTip": "Exécute les calculs de demande sur le GPU lorsqu’il est disponible plutôt que sur le CPU",
   "settingsTab.gpuDisabled": "Désactivé (CPU)",
   "settingsTab.gpuDisabledTip": "L’accélération WebGPU est désactivée ; utilisation du CPU",
+  "settingsTab.gpuBrowserBlocked": "WebGPU désactivé dans le navigateur (CPU)",
+  "settingsTab.gpuBrowserBlockedTip": "GPU matériel détecté ({gpu}), mais WebGPU est désactivé dans ce navigateur ({reason}) ; utilisation du CPU",
   "settingsTab.normal": "Normal",
   "settingsTab.opacity": "Opacité",
   "settingsTab.pink": "Rose",

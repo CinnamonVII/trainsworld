@@ -1840,6 +1840,8 @@
   "settingsTab.webgpuTip": "Runs demand calculations on the GPU when available instead of the CPU",
   "settingsTab.gpuDisabled": "Off (CPU)",
   "settingsTab.gpuDisabledTip": "WebGPU acceleration is turned off; using CPU",
+  "settingsTab.gpuBrowserBlocked": "Browser WebGPU off (CPU)",
+  "settingsTab.gpuBrowserBlockedTip": "Hardware GPU detected ({gpu}), but WebGPU is disabled in this browser ({reason}); using CPU fallback",
   "settingsTab.normal": "Normal",
   "settingsTab.opacity": "Opacity",
   "settingsTab.pink": "Pink",

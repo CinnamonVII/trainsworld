@@ -24,6 +24,7 @@ import {
   W_LEN,
   ZERO_PASS_WGSL,
 } from "./shaders";
+import { requestWebGpuAdapter, requestWebGpuDevice } from "./adapter";
 
 export interface GpuPassStageInputs {
   apiKey: number;
@@ -156,28 +157,17 @@ export class DemandGpuContext {
       return null;
     }
     try {
-      const adapter =
-        (await navigator.gpu.requestAdapter({ powerPreference: "high-performance" })) ??
-        (await navigator.gpu.requestAdapter());
+      const { adapter } = await requestWebGpuAdapter();
       if (!adapter) {
         return null;
       }
-      const requiredLimits: Record<string, number> = {};
-      if (adapter.limits.maxStorageBufferBindingSize >= 128 * 1024 * 1024) {
-        requiredLimits.maxStorageBufferBindingSize = Math.min(
-          adapter.limits.maxStorageBufferBindingSize,
-          512 * 1024 * 1024,
-        );
-      }
-      if (adapter.limits.maxBufferSize >= 256 * 1024 * 1024) {
-        requiredLimits.maxBufferSize = Math.min(
-          adapter.limits.maxBufferSize,
-          1024 * 1024 * 1024,
-        );
-      }
       const wantTs = !!opts?.timestamps && adapter.features.has("timestamp-query");
       const requiredFeatures: GPUFeatureName[] = wantTs ? ["timestamp-query"] : [];
-      const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
+      const device = await requestWebGpuDevice(adapter, {
+        maxStorageBindingMiB: 512,
+        maxBufferMiB: 1024,
+        requiredFeatures,
+      });
       const pipelines = await DemandGpuContext.compilePipelinesAsync(device);
       return new DemandGpuContext(device, pipelines, wantTs);
     } catch {
