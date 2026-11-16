@@ -245,6 +245,65 @@ fn a_wholly_planned_line_previews_its_plan_without_running() {
     assert!(ls.ok && !ls.running, "a planned line previews its times");
 }
 
+#[test]
+fn partial_one_way_arc_never_runs_over_unbuilt_return_track() {
+    let mut w = world();
+    let d = node(&mut w, -3000.0, 0.0, 0);
+    let a = node(&mut w, 0.0, 0.0, 0);
+    let j = node(&mut w, 3000.0, 0.0, 0);
+    let b = node(&mut w, 6000.0, 0.0, 0);
+    // D-A-J built double track; J->B built single-track one-way; B->J unbuilt return bypass
+    edge(&mut w, d, a, &[], 0).unwrap();
+    edge(&mut w, a, j, &[], 0).unwrap();
+    let jb = w.net.alloc_edge();
+    w.apply(Op::Edge { id: jb, data: Some(EdgeData { a: j, b, tracks: 1, pis: vec![], built: true, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 1, join: [0; 2] }) }).unwrap();
+    let bj = w.net.alloc_edge();
+    let bj_pis = [(7500.0, 0.0), (7500.0, 1500.0), (5000.0, 1500.0), (3400.0, 0.0)].into_iter().map(|(x, y)| Pi::new(x, y, 0.0, 0)).collect();
+    w.apply(Op::Edge { id: bj, data: Some(EdgeData { a: b, b: j, tracks: 1, pis: bj_pis, built: false, off: false, thru: vec![], crossover: false, kind: TrackKind::Regular, sep: false, day: 0, oneway: 1, join: [0; 2] }) }).unwrap();
+    for n in [d, a, b] {
+        station(&mut w, n, 200);
+    }
+    let l = line(&mut w, &[d, a, b], [8.0, 4.0, 2.0]);
+    // D-A has built return track, whereas J->B's return goes via unbuilt B->C->J; span must stop at A
+    let span = w.net.line_run_span(l).expect("D-A built span");
+    assert_eq!((span.stop0, span.stop1), (0, 2));
+    assert_eq!(w.net.line_run_stops(l), &[d, a]);
+    let ls = &w.svc.lines[l as usize];
+    assert!(ls.ok && ls.running);
+    assert!(ls.runs[1].segs.iter().all(|&p| w.net.edge_built[(p >> 1) as usize]), "return run stays on built track");
+
+    // On A->B alone, the built forward track has no built return, so it stays a preview
+    let l2 = line(&mut w, &[a, b], [8.0, 4.0, 2.0]);
+    assert!(w.net.line_run_span(l2).is_none());
+    assert!(!w.svc.lines[l2 as usize].running);
+}
+
+#[test]
+fn partial_one_way_loop_arc_is_tracked_by_back_lines() {
+    let (mut w, ns) = ring_fixture();
+    for e in 0..w.net.edge_count() as u32 {
+        let mut d = w.net.edge_data(e).unwrap();
+        d.tracks = 1;
+        d.oneway = 1;
+        w.apply(Op::Edge { id: e, data: Some(d) }).unwrap();
+    }
+    let l = line(&mut w, &closed(&ns), [8.0, 4.0, 2.0]);
+    set_one_way(&mut w, l, true);
+    // Keep only ns[0] and ns[1] constructed; ns[2..] remain blueprint so A->B runs both ways
+    // returning via built B->...->A one-way track.
+    for &s in &ns[2..] {
+        let mut st = w.net.station_data(s).unwrap();
+        st.built = false;
+        w.apply(Op::Station { node: s, data: Some(st) }).unwrap();
+    }
+    assert!(w.net.line_runs_once(l));
+    assert!(!w.net.line_run_runs_once(l));
+    assert_eq!(w.net.line_run_stops(l), &ns[..2]);
+    assert!(w.net.back_lines().contains(&l), "partial arc using one-way return bypass must be in back_lines");
+    assert!(!w.svc.lines[l as usize].one_way);
+    assert!(w.svc.lines[l as usize].runs[1].segs.len() >= 2);
+}
+
 /// A - B - C, stations at all three; B-C bends at a PI.
 fn simple() -> (TrackWorld, [u32; 3], [u32; 2], u32) {
     let mut w = world();

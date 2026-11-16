@@ -717,7 +717,7 @@ function RailLineInspector({ id }: { id: string }) {
         const nodes = [...new Set([...add].sort((a, b) => a.gap - b.gap).map((p) => p.node))];
         for (let k = 0; k < nodes.length; k++) if (!(await edit({ op: "insertStop", line: l.num, station: nodes[k] }, false, k > 0)).ok) break;
         const now = world.peek()?.save.lines.find((x) => x.num === l.num);
-        if (now && lineDraft.peek().line === l.num) lineDraft.value = { line: l.num, stops: now.stops.map(Number) };
+        if (now && lineDraft.peek().line === l.num) lineDraft.value = { line: l.num, stops: planStopsOf(now).map(Number) };
       })();
     }
     return setStops(build(add));
@@ -741,7 +741,7 @@ function RailLineInspector({ id }: { id: string }) {
     try {
       const a = await edit(op);
       const now = world.peek()?.save.lines.find((x) => x.num === l.num);
-      if (a.ok && now && lineDraft.peek().line === l.num) lineDraft.value = { line: l.num, stops: now.stops.map(Number) };
+      if (a.ok && now && lineDraft.peek().line === l.num) lineDraft.value = { line: l.num, stops: planStopsOf(now).map(Number) };
     } finally { stopEditing = false; }
   };
   // T-2919: no question, since an undo brings the line back (track and stations stay)
@@ -792,7 +792,7 @@ function RailLineInspector({ id }: { id: string }) {
       const a = await edit({ op: "orderStops", line: l.num, stops }, true);
       if (!a.ok) return say(orderWhy(a.issues), true);
       const now = world.peek()?.save.lines.find((x) => x.num === l.num);
-      if (now && lineDraft.peek().line === l.num) lineDraft.value = { line: l.num, stops: now.stops.map(Number) };
+      if (now && lineDraft.peek().line === l.num) lineDraft.value = { line: l.num, stops: planStopsOf(now).map(Number) };
     } finally { stopEditing = false; }
   };
   const rowDown = (e: PointerEvent, from: number) => {
